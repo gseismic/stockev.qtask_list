@@ -373,5 +373,39 @@ def clean_history(
         console.print(f"[green]Cleaned {total} expired history records from all queues[/green]")
 
 
+@app.command()
+def dashboard(
+    port: int = typer.Option(8000, "--port", "-p", help="Dashboard 端口"),
+    redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="启动后打开浏览器"),
+):
+    """启动 Dashboard"""
+    import os
+    import threading
+    import webbrowser
+    
+    os.environ["REDIS_URL"] = redis_url
+    
+    if not QTASK_LIST_AVAILABLE:
+        console.print("[red]Error: fastapi/uvicorn not installed. Run: pip install qtask_list[dashboard][/red]")
+        raise typer.Exit(1)
+    
+    console.print(f"[green]Starting Dashboard on http://localhost:{port}[/green]")
+    console.print(f"[cyan]Redis: {redis_url}[/cyan]")
+    console.print("Press Ctrl+C to stop\n")
+    
+    if open_browser:
+        def open_browser_delayed():
+            import time
+            time.sleep(2)
+            webbrowser.open(f"http://localhost:{port}")
+        threading.Thread(target=open_browser_delayed, daemon=True).start()
+    
+    import uvicorn
+    from dashboard.main import app
+    
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+
+
 if __name__ == "__main__":
     app()
