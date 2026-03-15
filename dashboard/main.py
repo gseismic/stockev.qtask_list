@@ -53,6 +53,72 @@ def get_queue_stats(queue_name):
     }
 
 
+def get_queue_tasks(queue_name: str, limit: int = 50) -> list:
+    """获取队列中的任务 (从主队列和历史)"""
+    r = get_redis()
+    results = []
+    
+    # 1. 从主队列获取待处理任务
+    queue_msgs = r.lrange(queue_name, 0, -1)
+    for msg in queue_msgs:
+        try:
+            # 尝试解析为 JSON
+            data = json.loads(msg)
+            if isinstance(data, dict):
+                payload_str = data.get("payload", "{}")
+                # payload 可能是 JSON 字符串
+                try:
+                    payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+                except:
+                    payload = {}
+                task = {
+                    "task_id": data.get("task_id", ""),
+                    "action": payload.get("action", "") if isinstance(payload, dict) else "unknown",
+                    "status": "pending",
+                    "_queue": queue_name,
+                    "_source": "queue",
+                    "_raw": data
+                }
+            else:
+                # 简单字符串
+                task = {
+                    "task_id": msg[:8] if len(msg) > 8 else msg,
+                    "action": "unknown",
+                    "status": "pending",
+                    "_queue": queue_name,
+                    "_source": "queue"
+                }
+            results.append(task)
+        except json.JSONDecodeError:
+            # 非 JSON 格式
+            task = {
+                "task_id": msg[:8] if len(msg) > 8 else msg,
+                "action": "unknown",
+                "status": "pending", 
+                "_queue": queue_name,
+                "_source": "queue"
+            }
+            results.append(task)
+    
+    # 2. 从 history 获取已完成的任务
+    idx_key = f"qtask:hist:{queue_name}"
+    task_ids = r.zrevrange(idx_key, 0, limit - 1)
+    
+    for tid in task_ids:
+        key = f"qtask:task:{tid}"
+        raw = r.get(key)
+        if raw:
+            try:
+                task = json.loads(raw)
+                task["_queue"] = queue_name
+                task["_source"] = "history"
+                results.append(task)
+            except:
+                continue
+    
+    return results[:limit]
+
+
 def get_all_tasks(
     queue: Optional[str] = None,
     status: Optional[str] = None,
@@ -61,26 +127,14 @@ def get_all_tasks(
     limit: int = 50,
 ) -> list:
     """获取任务列表，支持条件筛选"""
-    r = get_redis()
     results = []
     
     queues = [queue] if queue else get_all_queues()
     
     for q in queues:
-        idx_key = f"qtask:hist:{q}"
-        task_ids = r.zrevrange(idx_key, 0, -1)
+        tasks = get_queue_tasks(q, limit=limit)
         
-        for tid in task_ids:
-            key = f"qtask:task:{tid}"
-            raw = r.get(key)
-            if not raw:
-                continue
-            
-            try:
-                task = json.loads(raw)
-            except:
-                continue
-            
+        for task in tasks:
             # 筛选条件
             if status and task.get("status") != status:
                 continue
