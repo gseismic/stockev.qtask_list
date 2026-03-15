@@ -28,6 +28,7 @@ class SmartQueue:
         storage: Optional[RemoteStorage] = None,
         large_threshold: int = 50 * 1024,
         max_retry: int = 3,
+        ttl_days: int = 15,
     ):
         self.r = redis.from_url(redis_url, decode_responses=True)
 
@@ -44,7 +45,7 @@ class SmartQueue:
         self.large_threshold = large_threshold
         self.max_retry = max_retry
 
-        self.history = TaskHistory(redis_url, self.base)
+        self.history = TaskHistory(redis_url, self.base, ttl_days=ttl_days)
 
     # ==================== Push ====================
 

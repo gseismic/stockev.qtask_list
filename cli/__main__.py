@@ -330,5 +330,48 @@ def worker(
     w.run()
 
 
+@app.command()
+def clean_history(
+    queue_name: Optional[str] = typer.Argument(None, help="队列名称，如 stockev_list:fetch"),
+    namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
+    ttl_days: int = typer.Option(15, "--ttl-days", "-t", help="过期天数"),
+    redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
+):
+    """清理过期历史记录"""
+    if not QTASK_LIST_AVAILABLE:
+        console.print("[red]Error: qtask_list not installed. Run: pip install qtask_list[/red]")
+        raise typer.Exit(1)
+    
+    if queue_name and namespace and ":" not in queue_name:
+        queue_name = f"{namespace}:{queue_name}"
+    
+    from qtask_list import SmartQueue
+    
+    if queue_name:
+        full_name = queue_name.split(":")
+        ns = full_name[0] if len(full_name) > 1 else ""
+        q_name = full_name[-1]
+        
+        q = SmartQueue(redis_url, q_name, namespace=ns, ttl_days=ttl_days)
+        count = q.history.clean_expired()
+        console.print(f"[green]Cleaned {count} expired history records from {queue_name}[/green]")
+    else:
+        r = redis.from_url(redis_url, decode_responses=True)
+        hist_keys = r.keys("qtask:hist:*")
+        
+        total = 0
+        for hist_key in hist_keys:
+            queue = hist_key.replace("qtask:hist:", "")
+            full_name = queue.split(":")
+            ns = full_name[0] if len(full_name) > 1 else ""
+            q_name = full_name[-1]
+            
+            q = SmartQueue(redis_url, q_name, namespace=ns, ttl_days=ttl_days)
+            count = q.history.clean_expired()
+            total += count
+        
+        console.print(f"[green]Cleaned {total} expired history records from all queues[/green]")
+
+
 if __name__ == "__main__":
     app()
