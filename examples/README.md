@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-### 1. 股票数据 Pipeline (推荐)
+### 股票数据 Pipeline
 
 完整的 3 阶段 pipeline，涉及 2 个 namespace：
 
@@ -20,7 +20,7 @@ stockev_list:fetch → finance:calculate → stockev_list:store
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │   [Generator]                                              │
-│   python examples/stockev/00_generator.py                   │
+│   python examples/generator.py                                │
 │         │                                                   │
 │         ▼                                                   │
 │   ┌─────────────────┐                                        │
@@ -30,21 +30,15 @@ stockev_list:fetch → finance:calculate → stockev_list:store
 │            │                                                 │
 │            ▼                                                 │
 │   ┌─────────────────┐         ┌─────────────────┐          │
-│   │ fetch_worker    │────────▶│ finance:        │          │
-│   │ (爬取股票数据)  │         │ calculate       │          │
+│   │ stockev/       │────────▶│ finance/        │          │
+│   │ fetch_worker   │         │ calculate_worker │          │
 │   └─────────────────┘         └────────┬────────┘          │
 │                                      │                     │
 │                                      ▼                     │
 │   ┌─────────────────┐         ┌─────────────────┐          │
-│   │ calculate_worker│────────▶│ stockev_list:   │          │
-│   │ (计算MA)        │         │ store           │          │
-│   └─────────────────┘         └────────┬────────┘          │
-│                                      │                     │
-│                                      ▼                     │
-│   ┌─────────────────┐                                        │
-│   │ store_worker   │                                        │
-│   │ (存储结果)      │                                        │
-│   └─────────────────┘                                        │
+│   │ stockev/       │◀────────│ finance/        │          │
+│   │ store_worker   │         │ calculate_worker │          │
+│   └─────────────────┘         └─────────────────┘          │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -52,32 +46,43 @@ stockev_list:fetch → finance:calculate → stockev_list:store
 **运行步骤：**
 
 ```bash
-# 1. 启动 store worker (最后消费)
+# 终端1: store worker (stockev namespace)
 python examples/stockev/store_worker.py
 
-# 2. 启动 calculate worker (中间层)
+# 终端2: calculate worker (finance namespace)
 python examples/finance/calculate_worker.py
 
-# 3. 启动 fetch worker (最先消费)
+# 终端3: fetch worker (stockev namespace)
 python examples/stockev/fetch_worker.py
 
-# 4. 生成任务 (新开终端)
-python examples/stockev/00_generator.py
+# 终端4: 生成任务
+python examples/generator.py
 ```
 
-**或者使用 CLI 启动 workers：**
+## 目录结构
 
-```bash
-# 同时启动多个 workers
-python -m cli worker -q store -n stockev_list &
-python -m cli worker -q calculate -n finance &
-python -m cli worker -q fetch -n stockev_list &
-
-# 生成任务
-python examples/stockev/00_generator.py
+```
+examples/
+├── README.md                    # 本文件
+├── generator.py                 # 生成任务
+│
+├── stockev/                    # stockev namespace workers
+│   ├── fetch_worker.py         # 爬取数据
+│   └── store_worker.py         # 存储结果
+│
+└── finance/                    # finance namespace workers
+    └── calculate_worker.py    # 计算 MA
 ```
 
-### 2. CLI 常用命令
+## 任务流转
+
+| 阶段 | 队列 | Namespace | Action | Worker |
+|------|------|-----------|--------|--------|
+| 1 | fetch | stockev_list | fetch_stock | stockev/fetch_worker.py |
+| 2 | calculate | finance | calculate_ma | finance/calculate_worker.py |
+| 3 | store | stockev_list | store_result | stockev/store_worker.py |
+
+## CLI 常用命令
 
 ```bash
 # 查看队列状态
@@ -91,35 +96,11 @@ python -m cli history stockev_list:fetch
 
 # 清理过期历史
 python -m cli clean-history stockev_list:fetch
-
-# Crash recovery
-python -m cli recover stockev_list:fetch
 ```
-
-## 目录结构
-
-```
-examples/
-├── stockev/                  # 股票数据 pipeline
-│   ├── 00_generator.py      # 生成任务
-│   ├── fetch_worker.py      # 爬取 worker
-│   └── store_worker.py      # 存储 worker
-│
-└── finance/
-    └── calculate_worker.py  # 计算 worker
-```
-
-## 任务流转
-
-| 阶段 | 队列 | Namespace | Action |
-|------|------|----------|--------|
-| 1 | fetch | stockev_list | fetch_stock |
-| 2 | calculate | finance | calculate_ma |
-| 3 | store | stockev_list | store_result |
 
 ## 自定义
 
-修改 `examples/stockev/00_generator.py` 中的 `symbols` 列表来更改股票代码：
+修改 `examples/generator.py` 中的 `symbols` 列表来更改股票代码：
 
 ```python
 symbols = [
@@ -127,5 +108,3 @@ symbols = [
     "AMZN", "META", "NFLX", "AMD", "INTC",
 ]
 ```
-
-修改 worker 文件中的 namespace 来连接不同的队列。
