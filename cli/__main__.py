@@ -375,7 +375,7 @@ def clean_history(
 
 @app.command()
 def dashboard(
-    port: int = typer.Option(8000, "--port", "-p", help="Dashboard 端口"),
+    port: int = typer.Option(8765, "--port", "-p", help="Dashboard 端口"),
     redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="启动后打开浏览器"),
 ):
