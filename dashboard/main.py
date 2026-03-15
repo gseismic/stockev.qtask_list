@@ -35,7 +35,11 @@ def get_all_queues():
             continue
         if ":processing" in key or ":retry" in key or ":dlq" in key or ":delay" in key:
             continue
-        if ":hist:" in key or ":task:" in key:
+        if ":hist:" in key:
+            queue_name = key.replace("qtask:hist:", "")
+            queues.add(queue_name)
+            continue
+        if ":task:" in key:
             continue
         if r.type(key) == "list":
             queues.add(key)
