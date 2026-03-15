@@ -1,0 +1,43 @@
+[project]
+name = "qtask_list"
+version = "0.1.0"
+description = "Distributed task queue based on Redis List"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "redis>=5.0.0",
+    "loguru>=0.7.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+qtask = "cli.__main__:app"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qtask_list*", "cli*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
