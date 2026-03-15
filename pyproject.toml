@@ -27,6 +27,7 @@ dashboard = [
 ]
 
 [project.scripts]
+qtask = "cli.__main__:app"
 qtask_list = "cli.__main__:app"
 
 [build-system]
