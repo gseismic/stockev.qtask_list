@@ -35,7 +35,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qtask_list*", "cli*"]
+include = ["qtask_list*", "cli*", "dashboard*"]
 
 [tool.ruff]
 line-length = 100

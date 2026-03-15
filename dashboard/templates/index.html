@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>qtask_list Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        slate: {
+                            850: '#1a2234',
+                            900: '#0f172a',
+                            950: '#020617',
+                        }
+                    },
+                    fontFamily: {
+                        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        
+        /* Animations */
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .animate-pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+        
+        @keyframes spin-slow {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin-slow { animation: spin-slow 1.5s linear infinite; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+    <div id="app">
+        <!-- Loading State -->
+        <div v-if="loading" class="flex items-center justify-center min-h-screen">
+            <div class="flex flex-col items-center gap-4">
+                <div class="w-12 h-12 border-4 border-slate-700 border-t-cyan-400 rounded-full animate-spin"></div>
+                <span class="text-slate-400">Loading...</span>
+            </div>
+        </div>
+        
+        <!-- Main Content -->
+        <div v-else class="min-h-screen">
+            <!-- Header -->
+            <header class="bg-slate-900 border-b border-slate-800 sticky top-0 z-40">
+                <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                    <div class="flex items-center justify-between h-16">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-gradient-to-br from-cyan-400 to-purple-500 rounded-xl flex items-center justify-center font-bold text-slate-900 text-lg">
+                                Q
+                            </div>
+                            <div>
+                                <h1 class="text-lg font-semibold text-white">qtask_list</h1>
+                                <p class="text-xs text-slate-500">Distributed Task Queue</p>
+                            </div>
+                        </div>
+                        
+                        <div class="flex items-center gap-4">
+                            <!-- Health Status -->
+                            <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-800 rounded-full">
+                                <div :class="health.status === 'ok' ? 'bg-green-400' : 'bg-red-400'" class="w-2 h-2 rounded-full animate-pulse-dot"></div>
+                                <span class="text-sm text-slate-400">{{ health.status === 'ok' ? 'Connected' : 'Disconnected' }}</span>
+                            </div>
+                            
+                            <!-- Refresh Toggle -->
+                            <button @click="toggleAutoRefresh" :class="autoRefresh ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-400'" class="px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+                                <svg :class="autoRefresh && 'animate-spin-slow'" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                                {{ autoRefresh ? 'Auto' : 'Paused' }}
+                            </button>
+                            
+                            <!-- Last Update -->
+                            <span class="text-xs text-slate-500">Updated: {{ lastUpdate }}</span>
+                        </div>
+                    </div>
+                </div>
+            </header>
+            
+            <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+                <!-- Stats Cards -->
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                    <div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div class="text-2xl font-bold text-white">{{ totalTasks }}</div>
+                        <div class="text-sm text-slate-500">Total</div>
+                    </div>
+                    <div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div class="text-2xl font-bold text-green-400">{{ readyCount }}</div>
+                        <div class="text-sm text-slate-500">Ready</div>
+                    </div>
+                    <div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div class="text-2xl font-bold text-cyan-400">{{ processingCount }}</div>
+                        <div class="text-sm text-slate-500">Processing</div>
+                    </div>
+                    <div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div class="text-2xl font-bold text-yellow-400">{{ retryCount }}</div>
+                        <div class="text-sm text-slate-500">Retry</div>
+                    </div>
+                    <div class="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div class="text-2xl font-bold text-red-400">{{ dlqCount }}</div>
+                        <div class="text-sm text-slate-500">DLQ</div>
+                    </div>
+                </div>
+                
+                <!-- Filters -->
+                <div class="bg-slate-900 rounded-xl border border-slate-800 p-4 mb-6">
+                    <div class="flex flex-wrap items-center gap-4">
+                        <!-- Queue Select -->
+                        <div class="flex items-center gap-2">
+                            <label class="text-sm text-slate-400">Queue:</label>
+                            <select v-model="filters.queue" @change="fetchTasks" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500">
+                                <option value="">All Queues</option>
+                                <option v-for="q in queues" :key="q.name" :value="q.name">{{ q.name }}</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Status Select -->
+                        <div class="flex items-center gap-2">
+                            <label class="text-sm text-slate-400">Status:</label>
+                            <select v-model="filters.status" @change="fetchTasks" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500">
+                                <option value="">All Status</option>
+                                <option value="pending">Pending</option>
+                                <option value="completed">Completed</option>
+                                <option value="failed">Failed</option>
+                                <option value="retry">Retry</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Action Select -->
+                        <div class="flex items-center gap-2">
+                            <label class="text-sm text-slate-400">Action:</label>
+                            <select v-model="filters.action" @change="fetchTasks" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500">
+                                <option value="">All Actions</option>
+                                <option v-for="a in actions" :key="a" :value="a">{{ a }}</option>
+                            </select>
+                        </div>
+                        
+                        <!-- Search -->
+                        <div class="flex-1 min-w-[200px]">
+                            <div class="relative">
+                                <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                </svg>
+                                <input v-model="filters.search" @input="debounceSearch" type="text" placeholder="Search task ID or parameters..." 
+                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg pl-10 pr-4 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500">
+                            </div>
+                        </div>
+                        
+                        <!-- Clear Filters -->
+                        <button @click="clearFilters" class="px-3 py-1.5 text-sm text-slate-400 hover:text-white transition-colors">
+                            Clear
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Queue Stats (when no filter) -->
+                <div v-if="!filters.queue && queues.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                    <div v-for="q in queues" :key="q.name" @click="selectQueue(q.name)" 
+                        class="bg-slate-900 rounded-xl border border-slate-800 p-4 cursor-pointer hover:border-cyan-500/50 transition-colors">
+                        <div class="flex items-center justify-between mb-3">
+                            <span class="font-mono text-sm text-cyan-400">{{ q.name }}</span>
+                            <span class="text-xs text-slate-500">Click to filter</span>
+                        </div>
+                        <div class="grid grid-cols-5 gap-2 text-center">
+                            <div>
+                                <div class="text-lg font-bold text-white">{{ q.queue }}</div>
+                                <div class="text-xs text-slate-500">Ready</div>
+                            </div>
+                            <div>
+                                <div class="text-lg font-bold text-cyan-400">{{ q.processing }}</div>
+                                <div class="text-xs text-slate-500">Proc</div>
+                            </div>
+                            <div>
+                                <div class="text-lg font-bold text-yellow-400">{{ q.retry }}</div>
+                                <div class="text-xs text-slate-500">Retry</div>
+                            </div>
+                            <div>
+                                <div class="text-lg font-bold text-red-400">{{ q.dlq }}</div>
+                                <div class="text-xs text-slate-500">DLQ</div>
+                            </div>
+                            <div>
+                                <div class="text-lg font-bold text-purple-400">{{ q.delay }}</div>
+                                <div class="text-xs text-slate-500">Delay</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Tasks Table -->
+                <div class="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-slate-800/50">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Task ID</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Queue</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Action</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Status</th>
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Created</th>
+                                    <th class="px-4 py-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-800">
+                                <tr v-for="task in tasks" :key="task.task_id" class="hover:bg-slate-800/30 transition-colors">
+                                    <td class="px-4 py-3">
+                                        <span class="font-mono text-sm text-slate-300">{{ task.task_id.substring(0, 8) }}...</span>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="text-sm text-slate-400">{{ task._queue || '-' }}</span>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="px-2 py-1 bg-slate-800 rounded text-sm text-cyan-400">{{ task.action || '-' }}</span>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span :class="getStatusClass(task.status)" class="px-2 py-1 rounded text-xs font-medium">
+                                            {{ task.status || 'pending' }}
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="text-sm text-slate-400">{{ formatTime(task.created_at) }}</span>
+                                    </td>
+                                    <td class="px-4 py-3 text-right">
+                                        <button @click="viewTask(task)" class="text-cyan-400 hover:text-cyan-300 text-sm font-medium">
+                                            View
+                                        </button>
+                                    </td>
+                                </tr>
+                                <tr v-if="tasks.length === 0">
+                                    <td colspan="6" class="px-4 py-8 text-center text-slate-500">
+                                        No tasks found
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Results Count -->
+                <div class="mt-4 text-sm text-slate-500">
+                    Showing {{ tasks.length }} tasks
+                </div>
+            </main>
+        </div>
+        
+        <!-- Task Detail Modal -->
+        <div v-if="selectedTask" class="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="selectedTask = null"></div>
+            <div class="relative bg-slate-900 rounded-2xl border border-slate-700 w-full max-w-2xl max-h-[80vh] overflow-hidden shadow-2xl">
+                <!-- Modal Header -->
+                <div class="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+                    <h3 class="text-lg font-semibold text-white">Task Details</h3>
+                    <button @click="selectedTask = null" class="text-slate-400 hover:text-white">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+                
+                <!-- Modal Content -->
+                <div class="p-6 overflow-y-auto max-h-[calc(80vh-140px)]">
+                    <div class="grid grid-cols-2 gap-4 mb-6">
+                        <div>
+                            <label class="text-xs text-slate-500 uppercase">Task ID</label>
+                            <p class="font-mono text-sm text-white break-all">{{ selectedTask.task_id }}</p>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-500 uppercase">Queue</label>
+                            <p class="text-sm text-cyan-400">{{ selectedTask._queue || '-' }}</p>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-500 uppercase">Action</label>
+                            <p class="text-sm text-white">{{ selectedTask.action || '-' }}</p>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-500 uppercase">Status</label>
+                            <span :class="getStatusClass(selectedTask.status)" class="px-2 py-1 rounded text-xs font-medium">
+                                {{ selectedTask.status || 'pending' }}
+                            </span>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-500 uppercase">Created</label>
+                            <p class="text-sm text-white">{{ formatDateTime(selectedTask.created_at) }}</p>
+                        </div>
+                        <div v-if="selectedTask.updated_at">
+                            <label class="text-xs text-slate-500 uppercase">Updated</label>
+                            <p class="text-sm text-white">{{ formatDateTime(selectedTask.updated_at) }}</p>
+                        </div>
+                        <div v-if="selectedTask.reason">
+                            <label class="text-xs text-slate-500 uppercase">Reason</label>
+                            <p class="text-sm text-red-400">{{ selectedTask.reason }}</p>
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <label class="text-xs text-slate-500 uppercase mb-2 block">Payload</label>
+                        <pre class="bg-slate-950 rounded-lg p-4 text-sm text-slate-300 overflow-x-auto font-mono border border-slate-800">{{ formatJson(selectedTask) }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script>
+        const { createApp, ref, reactive, onMounted, onUnmounted } = Vue;
+        
+        createApp({
+            setup() {
+                const loading = ref(true);
+                const health = ref({ status: 'loading' });
+                const queues = ref([]);
+                const tasks = ref([]);
+                const actions = ref([]);
+                const selectedTask = ref(null);
+                const lastUpdate = ref('-');
+                const autoRefresh = ref(true);
+                
+                const filters = reactive({
+                    queue: '',
+                    status: '',
+                    action: '',
+                    search: ''
+                });
+                
+                let refreshInterval = null;
+                let searchTimeout = null;
+                
+                const totalTasks = ref(0);
+                const readyCount = ref(0);
+                const processingCount = ref(0);
+                const retryCount = ref(0);
+                const dlqCount = ref(0);
+                
+                async function fetchHealth() {
+                    try {
+                        const res = await fetch('/api/health');
+                        health.value = await res.json();
+                    } catch (e) {
+                        health.value = { status: 'error' };
+                    }
+                }
+                
+                async function fetchQueues() {
+                    try {
+                        const res = await fetch('/api/queues');
+                        queues.value = await res.json();
+                        
+                        totalTasks.value = 0;
+                        readyCount.value = 0;
+                        processingCount.value = 0;
+                        retryCount.value = 0;
+                        dlqCount.value = 0;
+                        
+                        queues.value.forEach(q => {
+                            totalTasks.value += q.queue + q.processing + q.retry + q.dlq + q.delay;
+                            readyCount.value += q.queue;
+                            processingCount.value += q.processing;
+                            retryCount.value += q.retry;
+                            dlqCount.value += q.dlq;
+                        });
+                    } catch (e) {
+                        console.error('Failed to fetch queues:', e);
+                    }
+                }
+                
+                async function fetchTasks() {
+                    try {
+                        const params = new URLSearchParams();
+                        if (filters.queue) params.append('queue', filters.queue);
+                        if (filters.status) params.append('status', filters.status);
+                        if (filters.action) params.append('action', filters.action);
+                        if (filters.search) params.append('search', filters.search);
+                        params.append('limit', '100');
+                        
+                        const res = await fetch('/api/tasks?' + params);
+                        const data = await res.json();
+                        tasks.value = data.tasks;
+                    } catch (e) {
+                        console.error('Failed to fetch tasks:', e);
+                    }
+                }
+                
+                async function fetchActions() {
+                    try {
+                        const res = await fetch('/api/actions');
+                        actions.value = await res.json();
+                    } catch (e) {
+                        console.error('Failed to fetch actions:', e);
+                    }
+                }
+                
+                async function fetchAll() {
+                    await Promise.all([fetchHealth(), fetchQueues(), fetchTasks(), fetchActions()]);
+                    loading.value = false;
+                    lastUpdate.value = new Date().toLocaleTimeString();
+                }
+                
+                function toggleAutoRefresh() {
+                    autoRefresh.value = !autoRefresh.value;
+                    if (autoRefresh.value) {
+                        startAutoRefresh();
+                    } else {
+                        stopAutoRefresh();
+                    }
+                }
+                
+                function startAutoRefresh() {
+                    if (refreshInterval) clearInterval(refreshInterval);
+                    refreshInterval = setInterval(fetchAll, 2000);
+                }
+                
+                function stopAutoRefresh() {
+                    if (refreshInterval) {
+                        clearInterval(refreshInterval);
+                        refreshInterval = null;
+                    }
+                }
+                
+                function debounceSearch() {
+                    if (searchTimeout) clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(fetchTasks, 300);
+                }
+                
+                function selectQueue(name) {
+                    filters.queue = name;
+                    fetchTasks();
+                }
+                
+                function clearFilters() {
+                    filters.queue = '';
+                    filters.status = '';
+                    filters.action = '';
+                    filters.search = '';
+                    fetchTasks();
+                }
+                
+                function viewTask(task) {
+                    selectedTask.value = task;
+                }
+                
+                function getStatusClass(status) {
+                    const classes = {
+                        'pending': 'bg-yellow-500/20 text-yellow-400',
+                        'completed': 'bg-green-500/20 text-green-400',
+                        'failed': 'bg-red-500/20 text-red-400',
+                        'retry': 'bg-cyan-500/20 text-cyan-400'
+                    };
+                    return classes[status] || classes.pending;
+                }
+                
+                function formatTime(timestamp) {
+                    if (!timestamp) return '-';
+                    const date = new Date(timestamp * 1000);
+                    const now = new Date();
+                    const diff = Math.floor((now - date) / 1000);
+                    
+                    if (diff < 60) return `${diff}s ago`;
+                    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+                    return date.toLocaleDateString();
+                }
+                
+                function formatDateTime(timestamp) {
+                    if (!timestamp) return '-';
+                    return new Date(timestamp * 1000).toLocaleString();
+                }
+                
+                function formatJson(obj) {
+                    const exclude = ['_queue'];
+                    const filtered = { ...obj };
+                    exclude.forEach(k => delete filtered[k]);
+                    return JSON.stringify(filtered, null, 2);
+                }
+                
+                onMounted(() => {
+                    fetchAll();
+                    startAutoRefresh();
+                });
+                
+                onUnmounted(() => {
+                    stopAutoRefresh();
+                });
+                
+                return {
+                    loading,
+                    health,
+                    queues,
+                    tasks,
+                    actions,
+                    selectedTask,
+                    lastUpdate,
+                    autoRefresh,
+                    filters,
+                    totalTasks,
+                    readyCount,
+                    processingCount,
+                    retryCount,
+                    dlqCount,
+                    toggleAutoRefresh,
+                    fetchTasks,
+                    selectQueue,
+                    clearFilters,
+                    debounceSearch,
+                    viewTask,
+                    getStatusClass,
+                    formatTime,
+                    formatDateTime,
+                    formatJson
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
