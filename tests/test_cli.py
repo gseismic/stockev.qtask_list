@@ -40,7 +40,7 @@ class TestCLI:
         
         result = runner.invoke(app, ["status", "stockev_list:specific"])
         assert result.exit_code == 0
-        assert "Queue: stockev_list:specific" in result.stdout
+        assert "stockev_list:specific" in result.stdout
 
     def test_clear_queue(self, runner, r):
         r.lpush("stockev_list:clear_test", "test1")

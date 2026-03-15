@@ -100,11 +100,15 @@ def get_queue_tasks(queue_name: str, limit: int = 50) -> list:
             }
             results.append(task)
     
-    # 2. 从 history 获取已完成的任务
+    # 2. 从 history 获取已完成的任务（排除已在队列中的任务）
+    queue_task_ids = {t.get("task_id") for t in results if t.get("task_id")}
+    
     idx_key = f"qtask:hist:{queue_name}"
     task_ids = r.zrevrange(idx_key, 0, limit - 1)
     
     for tid in task_ids:
+        if tid in queue_task_ids:
+            continue
         key = f"qtask:task:{tid}"
         raw = r.get(key)
         if raw:
@@ -243,16 +247,16 @@ def api_actions():
     r = get_redis()
     actions = set()
     task_keys = r.keys("qtask:task:*")
-    for key in task_keys[:1000]:  # 限制扫描数量
+    for key in task_keys[:1000]:
         raw = r.get(key)
         if raw:
             try:
                 task = json.loads(raw)
-                if "action" in task:
+                if task.get("action"):
                     actions.add(task["action"])
             except:
                 continue
-    return sorted(list(actions))
+    return sorted([a for a in actions if a])
 
 
 # ==================== HTML ====================

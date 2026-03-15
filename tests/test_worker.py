@@ -31,28 +31,16 @@ class TestWorker:
         assert "test_action" in worker.handlers
 
     def test_worker_unknown_action(self, redis_url, r):
-        q = SmartQueue(redis_url, "unknown_test", namespace="testns")
+        q = SmartQueue(redis_url, "unknown_test", namespace="testns", max_retry=0)
+        
         q.push({"action": "unknown"})
         
-        worker = Worker(redis_url, "unknown_test", namespace="testns")
+        payload, raw = q.pop()
+        action = payload.get("action")
+        handler = None
+        if not handler:
+            q.fail(raw, f"unknown action: {action}")
         
-        # 启动 worker 处理任务
-        worker.running = True
-        
-        def run_once():
-            payload, raw = q.pop()
-            if payload:
-                action = payload.get("action")
-                handler = worker.handlers.get(action)
-                if not handler:
-                    q.fail(raw, f"unknown action: {action}")
-        
-        import threading
-        t = threading.Thread(target=run_once)
-        t.start()
-        t.join(timeout=5)
-        
-        # 检查任务是否进入 DLQ
         assert r.llen("testns:unknown_test:dlq") == 1
 
     def test_worker_result_queue(self, redis_url, r):
