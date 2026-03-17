@@ -3,6 +3,7 @@ import time
 import uuid
 import redis
 from typing import Optional, Any, Dict, List
+from loguru import logger
 
 from .history import TaskHistory
 from .storage import RemoteStorage
@@ -11,7 +12,7 @@ from .storage import RemoteStorage
 class SmartQueue:
     """
     基于 Redis List 的智能任务队列
-    
+
     队列结构:
         {namespace}:{queue_name}         - 主队列
         {namespace}:{queue_name}:processing - 处理中
@@ -22,15 +23,21 @@ class SmartQueue:
 
     def __init__(
         self,
-        redis_url: str,
-        queue_name: str,
+        redis_url: Optional[str] = None,
+        queue_name: str = "",
         namespace: Optional[str] = None,
         storage: Optional[RemoteStorage] = None,
         large_threshold: int = 50 * 1024,
         max_retry: int = 3,
         ttl_days: int = 15,
+        redis_client: Optional[redis.Redis] = None,
     ):
-        self.r = redis.from_url(redis_url, decode_responses=True)
+        if redis_client is not None:
+            self.r = redis_client
+        elif redis_url:
+            self.r = redis.from_url(redis_url, decode_responses=True)
+        else:
+            raise ValueError("Either redis_url or redis_client must be provided")
 
         self.namespace = namespace or ""
         self.base = f"{self.namespace}:{queue_name}" if self.namespace else queue_name
@@ -45,55 +52,78 @@ class SmartQueue:
         self.large_threshold = large_threshold
         self.max_retry = max_retry
 
-        self.history = TaskHistory(redis_url, self.base, ttl_days=ttl_days)
+        self.history = TaskHistory(redis_client=self.r, queue_name=self.base, ttl_days=ttl_days)
 
     # ==================== Push ====================
 
     def push(self, payload: Dict[str, Any], delay_seconds: int = 0) -> str:
         """
         推送任务到队列
-        
-        Args:
-            payload: 任务数据
-            delay_seconds: 延迟秒数
-            
-        Returns:
-            task_id
         """
-        task_id = str(uuid.uuid4())
+        try:
+            task_id = str(uuid.uuid4())
 
-        original_action = payload.get("action")
-        payload_json = json.dumps(payload)
-        data = payload_json.encode("utf-8")
-
-        if self.storage and len(data) > self.large_threshold:
-            key = self.storage.save_bytes(data)
-            payload = {"_large": True, "key": key}
+            original_action = payload.get("action")
             payload_json = json.dumps(payload)
+            data = payload_json.encode("utf-8")
 
-        msg = json.dumps({
-            "task_id": task_id,
-            "payload": payload_json
-        })
+            if self.storage and len(data) > self.large_threshold:
+                key = self.storage.save_bytes(data)
+                payload = {"_large": True, "key": key}
+                payload_json = json.dumps(payload)
 
-        self.history.record(task_id, {
-            "action": original_action,
-            "status": "pending"
-        })
+            msg = json.dumps({"task_id": task_id, "payload": payload_json})
 
-        if delay_seconds > 0:
-            self._push_delay(msg, delay_seconds)
-        else:
-            self.r.lpush(self.queue, msg)
+            self.history.record(task_id, {"action": original_action, "status": "pending"})
 
-        return task_id
+            if delay_seconds > 0:
+                self._push_delay(msg, delay_seconds)
+            else:
+                self.r.lpush(self.queue, msg)
+
+            return task_id
+        except Exception as e:
+            logger.error(f"Push failed: {e}")
+            raise
 
     def push_batch(self, payloads: List[Dict[str, Any]]) -> List[str]:
         """批量推送任务"""
         task_ids = []
+        pipe = self.r.pipeline()
+
         for payload in payloads:
-            task_id = self.push(payload)
+            task_id = str(uuid.uuid4())
             task_ids.append(task_id)
+
+            original_action = payload.get("action")
+            payload_json = json.dumps(payload)
+            data = payload_json.encode("utf-8")
+
+            if self.storage and len(data) > self.large_threshold:
+                key = self.storage.save_bytes(data)
+                payload = {"_large": True, "key": key}
+                payload_json = json.dumps(payload)
+
+            msg = json.dumps({"task_id": task_id, "payload": payload_json})
+
+            pipe.lpush(self.queue, msg)
+
+            task_key = f"qtask:task:{task_id}"
+            hist_data = {
+                "action": original_action,
+                "status": "pending",
+                "task_id": task_id,
+                "created_at": time.time(),
+            }
+            hist_mapping = {
+                k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in hist_data.items()
+            }
+            pipe.hset(task_key, mapping=hist_mapping)
+            pipe.expire(task_key, self.history.ttl_seconds)
+            pipe.zadd(self.history.idx_key, {task_id: time.time()})
+            pipe.expire(self.history.idx_key, self.history.ttl_seconds)
+
+        pipe.execute()
         return task_ids
 
     def _push_delay(self, msg: str, delay_seconds: int):
@@ -106,23 +136,24 @@ class SmartQueue:
     def pop(self, timeout: int = 10) -> Optional[tuple]:
         """
         从队列获取任务
-        
-        Returns:
-            (payload, raw_message) 或 (None, None)
         """
-        msg = self.r.brpoplpush(self.queue, self.processing, timeout)
+        try:
+            msg = self.r.brpoplpush(self.queue, self.processing, timeout)
 
-        if not msg:
+            if not msg:
+                return None, None
+
+            data = json.loads(msg)
+            payload = json.loads(data["payload"])
+
+            if payload.get("_large"):
+                raw = self.storage.load(payload["key"])
+                payload = json.loads(raw)
+
+            return payload, msg
+        except Exception as e:
+            logger.error(f"Pop failed: {e}")
             return None, None
-
-        data = json.loads(msg)
-        payload = json.loads(data["payload"])
-
-        if payload.get("_large"):
-            raw = self.storage.load(payload["key"])
-            payload = json.loads(raw)
-
-        return payload, msg
 
     def pop_no_wait(self) -> Optional[tuple]:
         """非阻塞 pop"""
@@ -162,16 +193,10 @@ class SmartQueue:
 
         if retry >= self.max_retry:
             self.r.lpush(self.dlq, raw_msg)
-            self.history.update(
-                data["task_id"],
-                {"status": "failed", "reason": reason}
-            )
+            self.history.update(data["task_id"], {"status": "failed", "reason": reason})
         else:
-            new_msg = json.dumps({
-                "task_id": data["task_id"],
-                "payload": json.dumps(payload)
-            })
-            self.r.lpush(self.retry, new_msg)
+            new_msg = json.dumps({"task_id": data["task_id"], "payload": json.dumps(payload)})
+            self.r.rpush(self.retry, new_msg)
             self.history.update(data["task_id"], {"status": "retry"})
 
     # ==================== Retry ====================
@@ -179,7 +204,7 @@ class SmartQueue:
     def move_retry(self) -> int:
         """
         将重试队列中的任务移回主队列
-        
+
         Returns:
             移动的任务数
         """
@@ -198,9 +223,13 @@ class SmartQueue:
         now = time.time()
 
         lua_script = """
-        local tasks = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1])
         local count = 0
-        for i, task in ipairs(tasks) do
+        while true do
+            local tasks = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, 1)
+            if #tasks == 0 then
+                break
+            end
+            local task = tasks[1]
             redis.call('LPUSH', KEYS[2], task)
             redis.call('ZREM', KEYS[1], task)
             count = count + 1
@@ -215,7 +244,7 @@ class SmartQueue:
     def recover(self) -> int:
         """
         Crash recovery: 将 processing 队列中的任务移回主队列
-        
+
         Returns:
             恢复的任务数
         """

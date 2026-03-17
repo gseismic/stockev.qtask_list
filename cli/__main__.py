@@ -2,9 +2,16 @@ import os
 import sys
 import redis
 import typer
-from typing import Optional, List
+import time
+import json
+import signal
+import threading
+import webbrowser
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 from rich.console import Console
 from rich.table import Table
+from loguru import logger
 
 try:
     from qtask_list import Worker, SmartQueue
@@ -33,29 +40,37 @@ def parse_queue_name(full_name: str) -> tuple:
 
 
 def list_all_queues(r: redis.Redis) -> List[str]:
-    """列出所有 qtask 队列"""
+    """列出所有 qtask 队列 (安全版，使用 SCAN)"""
     queues = set()
-    keys = r.keys("*")
-    for key in keys:
-        if not isinstance(key, str):
-            continue
+    # 使用 scan_iter 代替 keys("*")
+    for key in r.scan_iter("qtask:hist:*"):
+        queue_name = key.replace("qtask:hist:", "")
+        queues.add(queue_name)
+    
+    # 也扫描 list 类型
+    for key in r.scan_iter("*"):
         if ":processing" in key or ":retry" in key or ":dlq" in key or ":delay" in key:
             continue
         if ":hist:" in key or ":task:" in key:
             continue
-        if r.type(key) == "list":
-            queues.add(key)
+        try:
+            if r.type(key) == "list":
+                queues.add(key)
+        except:
+            continue
+            
     return sorted(queues)
 
 
 def get_queue_stats(r: redis.Redis, queue_name: str) -> dict:
     """获取队列统计"""
+    base = queue_name
     return {
-        "queue": r.llen(queue_name),
-        "processing": r.llen(f"{queue_name}:processing"),
-        "retry": r.llen(f"{queue_name}:retry"),
-        "dlq": r.llen(f"{queue_name}:dlq"),
-        "delay": r.zcard(f"{queue_name}:delay"),
+        "queue": r.llen(base),
+        "processing": r.llen(f"{base}:processing"),
+        "retry": r.llen(f"{base}:retry"),
+        "dlq": r.llen(f"{base}:dlq"),
+        "delay": r.zcard(f"{base}:delay"),
     }
 
 
@@ -100,17 +115,20 @@ def status(
         total = {"queue": 0, "processing": 0, "retry": 0, "dlq": 0, "delay": 0}
         
         for q in queues:
-            stats = get_queue_stats(r, q)
-            table.add_row(
-                q,
-                str(stats["queue"]),
-                str(stats["processing"]),
-                str(stats["retry"]),
-                str(stats["dlq"]),
-                str(stats["delay"]),
-            )
-            for k in total:
-                total[k] += stats[k]
+            try:
+                stats = get_queue_stats(r, q)
+                table.add_row(
+                    q,
+                    str(stats["queue"]),
+                    str(stats["processing"]),
+                    str(stats["retry"]),
+                    str(stats["dlq"]),
+                    str(stats["delay"]),
+                )
+                for k in total:
+                    total[k] += stats[k]
+            except Exception as e:
+                logger.error(f"Error getting stats for {q}: {e}")
         
         table.add_row(
             "[bold]Total[/bold]",
@@ -137,13 +155,14 @@ def clear(
             raise typer.Abort()
     
     r = get_redis()
-    
-    r.delete(queue_name)
-    r.delete(f"{queue_name}:processing")
-    r.delete(f"{queue_name}:retry")
-    r.delete(f"{queue_name}:delay")
+    pipe = r.pipeline()
+    pipe.delete(queue_name)
+    pipe.delete(f"{queue_name}:processing")
+    pipe.delete(f"{queue_name}:retry")
+    pipe.delete(f"{queue_name}:delay")
     if include_dlq:
-        r.delete(f"{queue_name}:dlq")
+        pipe.delete(f"{queue_name}:dlq")
+    pipe.execute()
     
     console.print(f"[green]Cleared {queue_name}[/green]")
 
@@ -214,24 +233,39 @@ def history(
     limit: int = typer.Option(20, "--limit", "-l", help="显示条数"),
     task_id: Optional[str] = typer.Option(None, "--task-id", "-t", help="查看特定任务"),
 ):
-    """查看任务历史"""
+    """查看任务历史记录"""
     r = get_redis()
     
     if task_id:
         key = f"qtask:task:{task_id}"
-        raw = r.get(key)
-        if raw:
-            import json
-            data = json.loads(raw)
-            console.print_json(json.dumps(data, indent=2))
+        rt = r.type(key)
+        if rt == "hash":
+            data = r.hgetall(key)
+            if data:
+                for k, v in data.items():
+                    try:
+                        data[k] = json.loads(v)
+                    except: pass
+                console.print_json(json.dumps(data, indent=2))
+                return
         else:
-            console.print(f"[yellow]Task {task_id} not found[/yellow]")
+            raw = r.get(key)
+            if raw:
+                console.print_json(raw)
+                return
+        
+        console.print(f"[yellow]Task {task_id} not found[/yellow]")
         return
     
-    idx_key = f"qtask:hist:{queue_name}"
-    task_ids = r.zrevrange(idx_key, 0, limit - 1)
+    from qtask_list import SmartQueue
+    full_name = queue_name.split(":")
+    ns = full_name[0] if len(full_name) > 1 else ""
+    q_name = full_name[-1]
     
-    if not task_ids:
+    q = SmartQueue(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), q_name, namespace=ns)
+    tasks = q.history.list(limit=limit)
+    
+    if not tasks:
         console.print("[yellow]No history found[/yellow]")
         return
     
@@ -241,27 +275,22 @@ def history(
     table.add_column("Status", style="yellow")
     table.add_column("Created", style="blue")
     
-    import json
-    for tid in task_ids:
-        key = f"qtask:task:{tid}"
-        raw = r.get(key)
-        if raw:
-            data = json.loads(raw)
-            from datetime import datetime
-            created = datetime.fromtimestamp(data.get("created_at", 0)).strftime("%H:%M:%S")
-            status_style = {
-                "pending": "yellow",
-                "completed": "green",
-                "failed": "red",
-                "retry": "magenta",
-            }.get(data.get("status", ""), "white")
-            
-            table.add_row(
-                tid[:8] + "...",
-                data.get("action", ""),
-                f"[{status_style}]{data.get('status', '')}[/]",
-                created,
-            )
+    for data in tasks:
+        tid = data.get("task_id", "unknown")
+        created = datetime.fromtimestamp(data.get("created_at", 0)).strftime("%H:%M:%S")
+        status_style = {
+            "pending": "yellow",
+            "completed": "green",
+            "failed": "red",
+            "retry": "magenta",
+        }.get(data.get("status", ""), "white")
+        
+        table.add_row(
+            tid[:8] + "...",
+            data.get("action", ""),
+            f"[{status_style}]{data.get('status', '')}[/]",
+            created,
+        )
     
     console.print(table)
 
@@ -274,13 +303,10 @@ def watch(
     redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
 ):
     """实时监控队列"""
-    import time
-    
     if namespace and ":" not in queue_name:
         queue_name = f"{namespace}:{queue_name}"
     
     r = redis.from_url(redis_url, decode_responses=True)
-    
     console.print(f"[green]Watching {queue_name} (Ctrl+C to exit)[/green]")
     
     try:
@@ -312,8 +338,6 @@ def worker(
         raise typer.Exit(1)
     
     ns = namespace if namespace else None
-    q = SmartQueue(redis_url, queue, namespace=ns)
-    
     result_q = None
     if result_queue:
         result_q = SmartQueue(redis_url, result_queue, namespace=ns)
@@ -357,10 +381,8 @@ def clean_history(
         console.print(f"[green]Cleaned {count} expired history records from {queue_name}[/green]")
     else:
         r = redis.from_url(redis_url, decode_responses=True)
-        hist_keys = r.keys("qtask:hist:*")
-        
         total = 0
-        for hist_key in hist_keys:
+        for hist_key in r.scan_iter("qtask:hist:*"):
             queue = hist_key.replace("qtask:hist:", "")
             full_name = queue.split(":")
             ns = full_name[0] if len(full_name) > 1 else ""
@@ -374,16 +396,55 @@ def clean_history(
 
 
 @app.command()
+def archive(
+    queue_name: Optional[str] = typer.Argument(None, help="队列名称"),
+    days: int = typer.Option(1, "--days", "-d", help="归档几天前的数据"),
+    redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
+):
+    """将历史记录归档到 SQLite"""
+    from qtask_list.archiver import ArchiveManager
+    archiver = ArchiveManager(redis_url)
+    
+    if queue_name:
+        count = archiver.archive_to_sqlite(queue_name, days_ago=days)
+        console.print(f"[green]Archived {count} tasks from {queue_name} to SQLite[/green]")
+    else:
+        r = redis.from_url(redis_url, decode_responses=True)
+        total = 0
+        for hist_key in r.scan_iter("qtask:hist:*"):
+            q_full = hist_key.replace("qtask:hist:", "")
+            count = archiver.archive_to_sqlite(q_full, days_ago=days)
+            total += count
+        console.print(f"[green]Archived {total} tasks from all queues to SQLite[/green]")
+
+
+@app.command()
+def monitor(
+    redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
+):
+    """查看 Redis 内存监控信息"""
+    from qtask_list.archiver import Monitor
+    r = redis.from_url(redis_url, decode_responses=True)
+    m = Monitor(r)
+    info = m.get_memory_info()
+    
+    table = Table(title="Redis Memory Monitor")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+    
+    for k, v in info.items():
+        table.add_row(k, str(v))
+    
+    console.print(table)
+
+
+@app.command()
 def dashboard(
     port: int = typer.Option(8765, "--port", "-p", help="Dashboard 端口"),
     redis_url: str = typer.Option("redis://localhost:6379/0", "--redis", help="Redis URL"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="启动后打开浏览器"),
 ):
-    """启动 Dashboard"""
-    import os
-    import threading
-    import webbrowser
-    
+    """启动 Dashboard 面板"""
     os.environ["REDIS_URL"] = redis_url
     
     if not QTASK_LIST_AVAILABLE:
@@ -396,7 +457,6 @@ def dashboard(
     
     if open_browser:
         def open_browser_delayed():
-            import time
             time.sleep(2)
             webbrowser.open(f"http://localhost:{port}")
         threading.Thread(target=open_browser_delayed, daemon=True).start()
