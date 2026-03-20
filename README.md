@@ -184,3 +184,9 @@ worker.run()
 ```bash
 export REDIS_URL=redis://localhost:6379/0
 ```
+
+## 创建skill
+opencode + codex/skill-creator with:
+```
+/skill-creator 为我创建使用本库的user guide，应详细包含examples，所有类的介绍，核心源代码的源文件，skill创建在本地 .agents中，名称为pai-qtask-list-codexskill-oc
+```
