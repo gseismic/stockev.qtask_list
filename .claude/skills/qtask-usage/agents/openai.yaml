@@ -1,0 +1,4 @@
+interface:
+  display_name: "qtask_list Usage"
+  short_description: "Practical usage patterns for qtask_list queue workflows."
+  default_prompt: "Use $qtask-usage to implement and validate a qtask_list queue workflow in this repository."
