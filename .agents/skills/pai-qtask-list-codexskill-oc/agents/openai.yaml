@@ -1,0 +1,6 @@
+display_name: qtask_list User Guide
+short_description: Comprehensive guide for qtask_list distributed queue with SmartQueue, Worker, retry/DLQ patterns, and pipeline examples.
+default_prompt: Help me use qtask_list to build a task queue with retry and DLQ, or explain SmartQueue vs Worker patterns, or show multi-stage pipeline examples.
+icon: 
+brand_color: 
+version: "1.0"
