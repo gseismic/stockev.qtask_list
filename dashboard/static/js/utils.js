@@ -59,6 +59,69 @@ export function compareQueues(a, b) {
     return String(a.name || "").localeCompare(String(b.name || ""));
 }
 
+export function isConnected(health = {}) {
+    return health?.status === "ok";
+}
+
+export function hasReadyBacklogWithoutWorker(stats = {}) {
+    return Number(stats.queue || 0) > 0 && Number(stats.active_workers || 0) === 0;
+}
+
+export function primaryQueueIssue(stats = {}) {
+    if (Number(stats.dlq || 0) > 0) {
+        return {
+            tone: "danger",
+            title: `死信队列有 ${stats.dlq} 个失败任务`,
+            detail: "先查看失败任务的 payload 和错误原因，再决定单条重试或批量重放。",
+            next: "建议先切到死信状态查看样本。",
+        };
+    }
+    if (Number(stats.retry || 0) > 0) {
+        return {
+            tone: "warning",
+            title: `有 ${stats.retry} 个任务等待重试`,
+            detail: "这些任务已经失败过但尚未进入死信，可手动移回待处理队列。",
+            next: "确认失败原因后执行重试队列。",
+        };
+    }
+    if (Number(stats.stale_workers || 0) > 0) {
+        return {
+            tone: "warning",
+            title: `发现 ${stats.stale_workers} 个失联 Worker`,
+            detail: "失联 Worker 可能留下处理中任务，优先使用安全恢复。",
+            next: "执行安全恢复前确认没有同名 Worker 仍在运行。",
+        };
+    }
+    if (hasReadyBacklogWithoutWorker(stats)) {
+        return {
+            tone: "warning",
+            title: `待处理队列积压 ${stats.queue} 个任务，但没有活跃 Worker`,
+            detail: "当前瓶颈不是单条任务，而是没有消费者处理队列。",
+            next: "启动对应 Worker，或确认业务消费者是否部署在正确的 Redis 和队列名上。",
+        };
+    }
+    if (Number(stats.processing || 0) > 0 && Number(stats.active_workers || 0) === 0) {
+        return {
+            tone: "warning",
+            title: `有 ${stats.processing} 个处理中任务，但没有活跃 Worker`,
+            detail: "这些任务可能来自异常退出的 Worker。",
+            next: "先执行安全恢复，再观察任务是否回到待处理。",
+        };
+    }
+    return {
+        tone: "ok",
+        title: "当前队列未发现需要立即处理的问题",
+        detail: "可以继续观察 Worker、历史和任务样本。",
+        next: "保持自动刷新即可。",
+    };
+}
+
+export function shouldOpenTaskSamples({ stats = {}, state = "all", search = "" }) {
+    if (search) return true;
+    if (state !== "all" && state !== "ready") return true;
+    return !hasReadyBacklogWithoutWorker(stats);
+}
+
 export function taskState(task) {
     return task._state || task.status || "ready";
 }

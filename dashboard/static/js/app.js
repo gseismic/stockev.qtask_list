@@ -1,16 +1,18 @@
 import { api } from "./api.js";
 import {
+    DangerActions,
     DiagnosePanel,
     PushTaskForm,
     QueueActions,
+    QueueIssueBanner,
     QueueList,
     StatsGrid,
+    SystemBanner,
     TaskDrawer,
-    TaskTable,
-    TaskToolbar,
+    TaskSamples,
     TopBar,
 } from "./components.js";
-import { compareQueues, confirmDanger, queueActivityCount, taskState } from "./utils.js";
+import { compareQueues, confirmDanger, isConnected, queueActivityCount, taskState } from "./utils.js";
 
 const h = React.createElement;
 const { useCallback, useEffect, useMemo, useState } = React;
@@ -47,6 +49,7 @@ function App() {
     ), [rankedQueues, selectedQueue]);
 
     const effectiveQueue = selectedQueue || selectedStats?.name || "";
+    const readOnly = !isConnected(health);
 
     const notify = useCallback((message) => {
         setToast(message);
@@ -105,8 +108,11 @@ function App() {
     }, []);
 
     useEffect(() => {
-        loadQueueDetail();
-    }, [effectiveQueue, state, taskSearch]);
+        loadQueueDetail().catch((error) => {
+            setHealth((value) => ({ ...value, status: "error", error: error.message }));
+            notify(error.message);
+        });
+    }, [effectiveQueue, loadQueueDetail, notify, state, taskSearch]);
 
     useEffect(() => {
         if (!autoRefresh) return undefined;
@@ -190,6 +196,7 @@ function App() {
             onToggleAuto: () => setAutoRefresh((value) => !value),
             key: "topbar",
         }),
+        h(SystemBanner, { health, key: "system" }),
         h("div", { className: "layout", key: "layout" }, [
             h(QueueList, {
                 queues,
@@ -202,7 +209,9 @@ function App() {
                 key: "queues",
             }),
             h("main", { className: "main", key: "main" }, effectiveQueue ? [
+                h("div", { className: "context-label", key: "context" }, "当前队列状态"),
                 h(StatsGrid, { stats, key: "stats" }),
+                h(QueueIssueBanner, { stats, key: "issue" }),
                 h("div", { className: "split", key: "split" }, [
                     h("section", { className: "panel", key: "tasks" }, [
                         h("div", { className: "panel-header", key: "header" }, [
@@ -213,40 +222,44 @@ function App() {
                             h(QueueActions, {
                                 queue: effectiveQueue,
                                 stats,
+                                readOnly,
                                 onRetry: retryQueue,
                                 onRequeueDlq: requeueDlq,
                                 onRecover: recoverQueue,
-                                onRecoverActive: recoverActive,
-                                onClear: clearQueue,
                                 key: "actions",
                             }),
                         ]),
                         h("div", { className: "panel-body", key: "body" }, [
-                            h(TaskToolbar, {
-                                search: taskSearch,
-                                onSearch: setTaskSearch,
-                                state,
-                                onState: setState,
-                                stats,
-                                key: "toolbar",
-                            }),
-                            h(TaskTable, {
+                            h(TaskSamples, {
                                 tasks,
                                 state,
                                 stats,
                                 search: taskSearch,
+                                readOnly,
+                                onSearch: setTaskSearch,
+                                onState: setState,
                                 onView: setSelectedTask,
                                 onRequeue: requeueTask,
                                 onDelete: deleteTask,
-                                key: "table",
+                                key: "samples",
                             }),
                         ]),
                     ]),
                     h("div", { key: "side" }, [
                         h(DiagnosePanel, { diagnose, workers, key: "diagnose" }),
                         h("div", { style: { height: "14px" }, key: "gap" }),
+                        h(DangerActions, {
+                            queue: effectiveQueue,
+                            stats,
+                            readOnly,
+                            onRecoverActive: recoverActive,
+                            onClear: clearQueue,
+                            key: "danger",
+                        }),
+                        h("div", { style: { height: "14px" }, key: "danger-gap" }),
                         h(PushTaskForm, {
                             queue: effectiveQueue,
+                            readOnly,
                             payloadText,
                             delaySeconds,
                             onPayload: setPayloadText,
@@ -260,6 +273,7 @@ function App() {
         ]),
         h(TaskDrawer, {
             task: selectedTask,
+            readOnly,
             onClose: () => setSelectedTask(null),
             onRequeue: requeueTask,
             onDelete: deleteTask,
