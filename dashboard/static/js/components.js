@@ -1,4 +1,17 @@
-import { canRequeue, formatTime, prettyJson, shortId, stateLabel, states, summarize, taskState } from "./utils.js";
+import {
+    canRequeue,
+    compareQueues,
+    formatTime,
+    liveCount,
+    prettyJson,
+    queueActivityCount,
+    shortId,
+    stateCount,
+    stateLabel,
+    states,
+    summarize,
+    taskState,
+} from "./utils.js";
 
 const h = React.createElement;
 
@@ -25,8 +38,12 @@ export function TopBar({ health, autoRefresh, lastUpdate, onRefresh, onToggleAut
     ]);
 }
 
-export function QueueList({ queues, selectedQueue, query, onQuery, onSelect }) {
-    const filtered = queues.filter((queue) => queue.name.toLowerCase().includes(query.toLowerCase()));
+export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQuery, onToggleCurrentOnly, onSelect }) {
+    const sorted = [...queues].sort(compareQueues);
+    const activeQueues = sorted.filter((queue) => queueActivityCount(queue) > 0);
+    const source = showCurrentOnly && activeQueues.length ? activeQueues : sorted;
+    const filtered = source.filter((queue) => queue.name.toLowerCase().includes(query.toLowerCase()));
+
     return h("aside", { className: "sidebar" }, [
         h("div", { className: "section-title", key: "title" }, "队列"),
         h("input", {
@@ -36,64 +53,122 @@ export function QueueList({ queues, selectedQueue, query, onQuery, onSelect }) {
             placeholder: "搜索队列",
             onChange: (event) => onQuery(event.target.value),
         }),
+        h("div", { className: "queue-tools", key: "tools" }, [
+            h("button", {
+                className: `chip ${showCurrentOnly ? "active" : ""}`,
+                onClick: onToggleCurrentOnly,
+                key: "toggle",
+            }, "只看当前"),
+            h("span", { className: "muted small", key: "count" }, `${activeQueues.length}/${queues.length}`),
+        ]),
         h("div", { className: "queue-list", key: "list" },
-            filtered.map((queue) => h("button", {
-                className: `queue-item ${queue.name === selectedQueue ? "active" : ""}`,
-                onClick: () => onSelect(queue.name),
-                key: queue.name,
-            }, [
-                h("div", { className: "queue-name", key: "name" }, queue.name),
-                h("div", { className: "queue-counts", key: "counts" }, [
-                    h("div", { className: "mini-stat", key: "ready" }, [h("strong", {}, queue.queue), h("span", {}, "Ready")]),
-                    h("div", { className: "mini-stat", key: "proc" }, [h("strong", {}, queue.processing), h("span", {}, "Proc")]),
-                    h("div", { className: "mini-stat", key: "retry" }, [h("strong", {}, queue.retry), h("span", {}, "Retry")]),
-                    h("div", { className: "mini-stat", key: "dlq" }, [h("strong", {}, queue.dlq), h("span", {}, "DLQ")]),
-                    h("div", { className: "mini-stat", key: "delay" }, [h("strong", {}, queue.delay), h("span", {}, "Delay")]),
-                ]),
-            ]))
+            filtered.length ? filtered.map((queue) => {
+                const hasDanger = Number(queue.dlq || 0) > 0 || Number(queue.stale_workers || 0) > 0;
+                const hasWork = liveCount(queue) > 0;
+                return h("button", {
+                    className: `queue-item ${queue.name === selectedQueue ? "active" : ""} ${hasDanger ? "has-danger" : ""} ${hasWork ? "has-work" : ""}`,
+                    onClick: () => onSelect(queue.name),
+                    key: queue.name,
+                }, [
+                    h("div", { className: "queue-name", key: "name" }, queue.name),
+                    h("div", { className: "queue-counts", key: "counts" }, [
+                        h("div", { className: "mini-stat", key: "ready" }, [h("strong", {}, queue.queue), h("span", {}, "待")]),
+                        h("div", { className: "mini-stat", key: "proc" }, [h("strong", {}, queue.processing), h("span", {}, "中")]),
+                        h("div", { className: "mini-stat", key: "retry" }, [h("strong", {}, queue.retry), h("span", {}, "重试")]),
+                        h("div", { className: "mini-stat", key: "dlq" }, [h("strong", {}, queue.dlq), h("span", {}, "死信")]),
+                        h("div", { className: "mini-stat", key: "delay" }, [h("strong", {}, queue.delay), h("span", {}, "延迟")]),
+                    ]),
+                ]);
+            }) : h("div", { className: "empty compact" }, "没有队列")
         ),
     ]);
 }
 
 export function StatsGrid({ stats }) {
     const items = [
-        ["Ready", stats.queue],
-        ["Processing", stats.processing],
-        ["Retry", stats.retry],
-        ["DLQ", stats.dlq],
-        ["Delay", stats.delay],
-        ["History", stats.history],
-        ["Workers", stats.active_workers],
+        { label: "待处理", value: stats.queue, tone: Number(stats.queue || 0) > 0 && Number(stats.active_workers || 0) === 0 ? "warning" : "" },
+        { label: "处理中", value: stats.processing },
+        { label: "待重试", value: stats.retry, tone: Number(stats.retry || 0) > 0 ? "warning" : "" },
+        { label: "死信", value: stats.dlq, tone: Number(stats.dlq || 0) > 0 ? "danger" : "" },
+        { label: "延迟", value: stats.delay },
+        {
+            label: "Worker",
+            value: stats.active_workers,
+            hint: Number(stats.stale_workers || 0) > 0
+                ? `${stats.stale_workers} 失联`
+                : (Number(stats.active_workers || 0) > 0 ? "活跃" : "无"),
+            tone: Number(stats.stale_workers || 0) > 0 ? "danger" : "",
+        },
+        { label: "历史", value: stats.history, tone: "muted" },
     ];
     return h("div", { className: "stats" },
-        items.map(([label, value]) => h("div", { className: "stat", key: label }, [
-            h("div", { className: "stat-value", key: "value" }, value ?? 0),
-            h("div", { className: "stat-label", key: "label" }, label),
+        items.map((item) => h("div", { className: `stat ${item.tone || ""}`, key: item.label }, [
+            h("div", { className: "stat-value", key: "value" }, item.value ?? 0),
+            h("div", { className: "stat-label", key: "label" }, item.label),
+            item.hint ? h("div", { className: "stat-hint", key: "hint" }, item.hint) : null,
         ]))
     );
 }
 
-export function StateTabs({ selectedState, onState }) {
+export function StateTabs({ selectedState, onState, stats }) {
     return h("div", { className: "tabs" },
         states.map((state) => h("button", {
             className: `tab ${state === selectedState ? "active" : ""}`,
             key: state,
             onClick: () => onState(state),
-        }, stateLabel(state)))
+        }, [
+            h("span", { key: "label" }, stateLabel(state)),
+            h("strong", { key: "count" }, stateCount(stats, state)),
+        ]))
     );
 }
 
-export function QueueActions({ queue, onRetry, onRequeueDlq, onRecover, onRecoverActive, onClear }) {
+export function QueueActions({ queue, stats, onRetry, onRequeueDlq, onRecover, onRecoverActive, onClear }) {
+    const retryDisabled = Number(stats.retry || 0) === 0;
+    const dlqDisabled = Number(stats.dlq || 0) === 0;
+    const processingDisabled = Number(stats.processing || 0) === 0;
+    const clearDisabled = liveCount(stats) === 0;
+
     return h("div", { className: "button-row" }, [
-        h("button", { className: "btn", onClick: () => onRetry(queue), key: "retry" }, "重试队列"),
-        h("button", { className: "btn", onClick: () => onRequeueDlq(queue), key: "dlq" }, "重放 DLQ"),
-        h("button", { className: "btn", onClick: () => onRecover(queue, false), key: "recover" }, "安全恢复"),
-        h("button", { className: "btn danger", onClick: () => onRecoverActive(queue), key: "force" }, "强制恢复"),
-        h("button", { className: "btn danger", onClick: () => onClear(queue), key: "clear" }, "清空"),
+        h("button", {
+            className: "btn",
+            disabled: retryDisabled,
+            onClick: () => onRetry(queue),
+            title: retryDisabled ? "没有待重试任务" : "将待重试任务移回待处理",
+            key: "retry",
+        }, "重试队列"),
+        h("button", {
+            className: "btn",
+            disabled: dlqDisabled,
+            onClick: () => onRequeueDlq(queue),
+            title: dlqDisabled ? "没有死信任务" : "将死信任务移回待处理",
+            key: "dlq",
+        }, "重放死信"),
+        h("button", {
+            className: "btn",
+            disabled: processingDisabled,
+            onClick: () => onRecover(queue, false),
+            title: processingDisabled ? "没有处理中任务" : "恢复失联 Worker 的处理中任务",
+            key: "recover",
+        }, "安全恢复"),
+        h("button", {
+            className: "btn danger",
+            disabled: processingDisabled,
+            onClick: () => onRecoverActive(queue),
+            title: processingDisabled ? "没有处理中任务" : "强制恢复所有处理中任务",
+            key: "force",
+        }, "强制恢复"),
+        h("button", {
+            className: "btn danger",
+            disabled: clearDisabled,
+            onClick: () => onClear(queue),
+            title: clearDisabled ? "当前没有可清空的任务" : "清空当前生命周期队列",
+            key: "clear",
+        }, "清空"),
     ]);
 }
 
-export function TaskToolbar({ search, onSearch, state, onState }) {
+export function TaskToolbar({ search, onSearch, state, onState, stats }) {
     return h("div", { className: "toolbar" }, [
         h("input", {
             className: "input",
@@ -102,13 +177,22 @@ export function TaskToolbar({ search, onSearch, state, onState }) {
             onChange: (event) => onSearch(event.target.value),
             key: "search",
         }),
-        h(StateTabs, { selectedState: state, onState, key: "tabs" }),
+        h(StateTabs, { selectedState: state, onState, stats, key: "tabs" }),
     ]);
 }
 
-export function TaskTable({ tasks, onView, onRequeue, onDelete }) {
+function emptyTaskText({ state, stats, search }) {
+    if (search) return "没有匹配任务";
+    if (state === "history") return "没有历史记录";
+    if (state === "all" && liveCount(stats) === 0 && Number(stats.history || 0) > 0) {
+        return `当前没有任务，可切到历史查看 ${stats.history} 条记录`;
+    }
+    return state === "all" ? "当前没有任务" : `没有${stateLabel(state)}任务`;
+}
+
+export function TaskTable({ tasks, state, stats, search, onView, onRequeue, onDelete }) {
     if (!tasks.length) {
-        return h("div", { className: "empty" }, "没有任务");
+        return h("div", { className: "empty" }, emptyTaskText({ state, stats, search }));
     }
     return h("div", { className: "table-wrap" },
         h("table", { className: "table" }, [
@@ -187,12 +271,13 @@ export function TaskDrawer({ task, onClose, onRequeue, onDelete }) {
 }
 
 export function PushTaskForm({ queue, payloadText, delaySeconds, onPayload, onDelay, onPush }) {
-    return h("div", { className: "panel" }, [
-        h("div", { className: "panel-header", key: "header" }, h("strong", {}, "投递任务")),
+    return h("details", { className: "panel push-panel" }, [
+        h("summary", { className: "panel-summary", key: "summary" }, "投递任务"),
         h("div", { className: "panel-body", key: "body" }, [
             h("textarea", {
                 className: "textarea",
                 value: payloadText,
+                placeholder: "JSON payload",
                 onChange: (event) => onPayload(event.target.value),
                 key: "payload",
             }),
@@ -202,6 +287,7 @@ export function PushTaskForm({ queue, payloadText, delaySeconds, onPayload, onDe
                     style: { width: "130px" },
                     type: "number",
                     min: "0",
+                    title: "延迟秒数",
                     value: delaySeconds,
                     onChange: (event) => onDelay(Number(event.target.value || 0)),
                     key: "delay",

@@ -10,16 +10,22 @@ import {
     TaskToolbar,
     TopBar,
 } from "./components.js";
-import { confirmDanger, taskState } from "./utils.js";
+import { compareQueues, confirmDanger, queueActivityCount, taskState } from "./utils.js";
 
 const h = React.createElement;
 const { useCallback, useEffect, useMemo, useState } = React;
+
+function chooseQueue(queues) {
+    const sorted = [...queues].sort(compareQueues);
+    return sorted.find((queue) => queueActivityCount(queue) > 0) || sorted[0] || null;
+}
 
 function App() {
     const [health, setHealth] = useState({ status: "loading" });
     const [queues, setQueues] = useState([]);
     const [selectedQueue, setSelectedQueue] = useState("");
     const [queueQuery, setQueueQuery] = useState("");
+    const [showCurrentOnly, setShowCurrentOnly] = useState(true);
     const [state, setState] = useState("all");
     const [taskSearch, setTaskSearch] = useState("");
     const [tasks, setTasks] = useState([]);
@@ -32,10 +38,13 @@ function App() {
     const [payloadText, setPayloadText] = useState('{\n  "action": "example"\n}');
     const [delaySeconds, setDelaySeconds] = useState(0);
 
-    const selectedStats = useMemo(
-        () => queues.find((queue) => queue.name === selectedQueue) || queues[0] || null,
-        [queues, selectedQueue]
-    );
+    const rankedQueues = useMemo(() => [...queues].sort(compareQueues), [queues]);
+
+    const selectedStats = useMemo(() => (
+        rankedQueues.find((queue) => queue.name === selectedQueue)
+            || chooseQueue(rankedQueues)
+            || null
+    ), [rankedQueues, selectedQueue]);
 
     const effectiveQueue = selectedQueue || selectedStats?.name || "";
 
@@ -47,11 +56,19 @@ function App() {
     const loadQueues = useCallback(async () => {
         const data = await api.queues();
         setQueues(data);
-        if (!effectiveQueue && data.length) {
-            setSelectedQueue(data[0].name);
-        }
+        setSelectedQueue((current) => {
+            const currentStats = data.find((queue) => queue.name === current);
+            const hasActiveQueues = data.some((queue) => queueActivityCount(queue) > 0);
+            if (
+                currentStats
+                && (!showCurrentOnly || queueActivityCount(currentStats) > 0 || !hasActiveQueues)
+            ) {
+                return current;
+            }
+            return chooseQueue(data)?.name || "";
+        });
         return data;
-    }, [effectiveQueue]);
+    }, [showCurrentOnly]);
 
     const loadQueueDetail = useCallback(async (queue = effectiveQueue) => {
         if (!queue) {
@@ -146,6 +163,13 @@ function App() {
             notify(`Payload JSON 无效：${error.message}`);
         }
     };
+    const toggleCurrentOnly = () => {
+        const nextValue = !showCurrentOnly;
+        setShowCurrentOnly(nextValue);
+        if (nextValue && selectedStats && queueActivityCount(selectedStats) === 0) {
+            setSelectedQueue(chooseQueue(queues)?.name || selectedQueue);
+        }
+    };
 
     const stats = selectedStats || {
         queue: 0,
@@ -171,7 +195,9 @@ function App() {
                 queues,
                 selectedQueue: effectiveQueue,
                 query: queueQuery,
+                showCurrentOnly,
                 onQuery: setQueueQuery,
+                onToggleCurrentOnly: toggleCurrentOnly,
                 onSelect: setSelectedQueue,
                 key: "queues",
             }),
@@ -186,6 +212,7 @@ function App() {
                             ]),
                             h(QueueActions, {
                                 queue: effectiveQueue,
+                                stats,
                                 onRetry: retryQueue,
                                 onRequeueDlq: requeueDlq,
                                 onRecover: recoverQueue,
@@ -200,10 +227,14 @@ function App() {
                                 onSearch: setTaskSearch,
                                 state,
                                 onState: setState,
+                                stats,
                                 key: "toolbar",
                             }),
                             h(TaskTable, {
                                 tasks,
+                                state,
+                                stats,
+                                search: taskSearch,
                                 onView: setSelectedTask,
                                 onRequeue: requeueTask,
                                 onDelete: deleteTask,
