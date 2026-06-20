@@ -982,5 +982,28 @@ def task_delete(
         )
 
 
+@app.command()
+def storage(
+    port: int = typer.Option(8096, "--port", "-p", help="监听端口"),
+    data_dir: str = typer.Option("", "--data-dir", "-d", help="数据目录，默认 ~/.qtask-storage"),
+    host: str = typer.Option("0.0.0.0", "--host", help="监听地址"),
+    ttl_days: float = typer.Option(7.0, "--ttl-days", help="文件保留天数，0=永不过期"),
+):
+    """启动 RemoteStorage 服务（大 payload 外存）"""
+    try:
+        from remote_storage.server import app as storage_app
+    except ImportError:
+        console.print("[red]remote_storage 模块未安装[/red]")
+        raise typer.Exit(1)
+
+    import uvicorn
+
+    data_path = Path(data_dir) if data_dir else Path.home() / ".qtask-storage"
+    data_path.mkdir(parents=True, exist_ok=True)
+
+    console.print(f"[green]RemoteStorage 启动: port={port}, data={data_path}, ttl={ttl_days}天[/green]")
+    uvicorn.run(storage_app, host=host, port=port)
+
+
 if __name__ == "__main__":
     app()
