@@ -1,0 +1,4 @@
+interface:
+  display_name: "qtask-list-usage"
+  short_description: "qtask_list distributed task queue user guide"
+  default_prompt: "Use qtask_list to build Redis-based task pipelines."
