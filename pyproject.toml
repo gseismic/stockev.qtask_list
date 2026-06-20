@@ -38,6 +38,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["qtask_list*", "cli*", "dashboard*"]
 
+[tool.setuptools.package-data]
+dashboard = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"

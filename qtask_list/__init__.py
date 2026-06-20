@@ -1,8 +1,9 @@
 from .queue import SmartQueue
 from .worker import Worker
 from .storage import RemoteStorage
+from .admin import QueueAdmin, QueueState
 
-__all__ = ["SmartQueue", "Worker", "RemoteStorage", "start_dashboard"]
+__all__ = ["SmartQueue", "Worker", "RemoteStorage", "QueueAdmin", "QueueState", "start_dashboard"]
 
 __version__ = "0.1.0"
 

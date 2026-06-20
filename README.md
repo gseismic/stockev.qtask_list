@@ -195,6 +195,31 @@ worker.run()
 - **优雅停止**：`SIGINT/SIGTERM` 信号 → `stop()`；线程池 drain 期间继续刷新 heartbeat，任务处理完成后再清理 Worker 状态。
 - **maintenance_interval**：默认 30 分钟执行一次归档和内存检查。
 
+### QueueAdmin — 管理接口
+
+`QueueAdmin` 是给 Dashboard、CLI、Agent 和运维脚本复用的任务生命周期控制接口。它使用用户能理解的状态和动作，不要求调用方直接拼 Redis Key。
+
+```python
+from qtask_list import QueueAdmin
+
+admin = QueueAdmin("redis://localhost:6379/0")
+
+# 查看队列和任务
+queues = admin.list_queues()
+tasks = admin.list_tasks("stockev:day-kline:fetch", state="dlq", limit=50)
+detail = admin.get_task("<task_id>")
+
+# 手动控制
+admin.requeue_task("stockev:day-kline:fetch", "<task_id>", from_state="dlq")
+admin.requeue_dlq("stockev:day-kline:fetch")
+admin.move_retry("stockev:day-kline:fetch")
+admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
+
+# 删除和诊断
+admin.delete_task("<task_id>", queue_name="stockev:day-kline:fetch")
+admin.diagnose("stockev:day-kline:fetch")
+```
+
 ### TaskHistory — 任务历史
 
 记录每个任务从创建到完成/失败的全生命周期状态：
@@ -358,6 +383,16 @@ qtask monitor
 # 启动 Web Dashboard
 qtask dashboard
 ```
+
+Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localhost:8765`。页面支持：
+
+- 按队列查看 ready/processing/retry/dlq/delay/history。
+- 搜索 task_id、action、payload。
+- 查看任务详情和原始 JSON。
+- 单任务重试、删除。
+- 批量 drain retry、重放 DLQ。
+- 安全恢复 stale processing；强制恢复 active processing 需要显式确认。
+- 投递测试任务，支持 delay。
 
 ## 配置参数
 
