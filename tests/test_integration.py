@@ -14,11 +14,11 @@ def r(redis_url):
 
     client = redis.from_url(redis_url, decode_responses=True)
     yield client
-    keys = client.keys("testns:*")
-    for k in keys:
+    for k in client.scan_iter("testns:*"):
         client.delete(k)
-    keys = client.keys("integration:*")
-    for k in keys:
+    for k in client.scan_iter("integration:*"):
+        client.delete(k)
+    for k in client.scan_iter("qtask:hist:integration:*"):
         client.delete(k)
 
 
@@ -29,7 +29,7 @@ class TestIntegration:
         fetch_q = SmartQueue(redis_url, "fetch", namespace="integration")
         store_q = SmartQueue(redis_url, "store", namespace="integration")
 
-        task_id = fetch_q.push({"action": "fetch_data", "symbol": "AAPL"})
+        fetch_q.push({"action": "fetch_data", "symbol": "AAPL"})
 
         # 2. fetch worker 处理
         payload, raw = fetch_q.pop()
@@ -192,7 +192,8 @@ class TestEdgeCases:
         fake_msg = json.dumps({"task_id": "nonexistent", "payload": "{}"})
 
         # 不应该抛出异常
-        q.fail(fake_msg, "test error")
+        assert q.fail(fake_msg, "test error") is False
+        assert r.llen("integration:fail_test:retry") == 0
 
 
 class TestHistory:

@@ -21,10 +21,8 @@ FINANCE_NS = "finance"
 
 
 def main():
-    # 创建两个队列
+    # 创建入口队列
     fetch_q = SmartQueue(REDIS_URL, "fetch", namespace=STOCKEV_NS)
-    calculate_q = SmartQueue(REDIS_URL, "calculate", namespace=FINANCE_NS)
-    store_q = SmartQueue(REDIS_URL, "store", namespace=STOCKEV_NS)
 
     symbols = [
         "AAPL", "TSLA", "NVDA", "MSFT", "GOOG",

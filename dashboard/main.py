@@ -1,7 +1,7 @@
 import os
 import redis
 import json
-from typing import Optional
+from typing import Any, Optional, cast
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +13,7 @@ app = FastAPI(title="qtask_list Dashboard")
 
 # Redis 连接池
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+redis_client: Any = redis.from_url(REDIS_URL, decode_responses=True)
 monitor = Monitor(redis_client)
 
 app.add_middleware(
@@ -49,11 +49,17 @@ def get_all_queues():
     return sorted(queues)
 
 
+def processing_keys(queue_name: str) -> list:
+    keys = {f"{queue_name}:processing"}
+    keys.update(redis_client.scan_iter(f"{queue_name}:processing:*"))
+    return sorted(keys)
+
+
 def get_queue_stats(queue_name):
     r = redis_client
     return {
         "queue": r.llen(queue_name),
-        "processing": r.llen(f"{queue_name}:processing"),
+        "processing": sum(r.llen(key) for key in processing_keys(queue_name)),
         "retry": r.llen(f"{queue_name}:retry"),
         "dlq": r.llen(f"{queue_name}:dlq"),
         "delay": r.zcard(f"{queue_name}:delay"),
@@ -135,24 +141,24 @@ def get_queue_tasks(queue_name: str, limit: int = 50) -> list:
             if not data:
                 continue
                 
-            task = None
+            history_task: Optional[dict] = None
             if rtype == "hash":
-                task = {}
+                history_task = {}
                 for k, v in data.items():
                     try:
-                        task[k] = json.loads(v)
+                        history_task[k] = json.loads(v)
                     except (json.JSONDecodeError, TypeError):
-                        task[k] = v
+                        history_task[k] = v
             elif rtype == "string":
                 try:
-                    task = json.loads(data)
+                    history_task = json.loads(data)
                 except (json.JSONDecodeError, TypeError):
                     continue
             
-            if task:
-                task["_queue"] = queue_name
-                task["_source"] = "history"
-                results.append(task)
+            if history_task:
+                history_task["_queue"] = queue_name
+                history_task["_source"] = "history"
+                results.append(history_task)
     
     return results[:limit]
 
@@ -214,7 +220,7 @@ def get_task_detail(task_id: str) -> Optional[dict]:
     else:
         raw = r.get(key)
         if raw:
-            return json.loads(raw)
+            return cast(dict, json.loads(raw))
     return None
 
 
@@ -251,7 +257,7 @@ def get_task_by_queue(queue_name: str, limit: int = 50) -> list:
         if not data:
             continue
             
-        task = None
+        task: Optional[dict] = None
         if rtype == "hash":
             task = {}
             for k, v in data.items():
@@ -358,4 +364,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8765))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

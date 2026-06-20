@@ -1,5 +1,6 @@
 import pytest
 import time
+import redis
 from qtask_list import Worker, SmartQueue
 
 
@@ -10,11 +11,11 @@ def redis_url():
 
 @pytest.fixture
 def r(redis_url):
-    import redis
     client = redis.from_url(redis_url, decode_responses=True)
     yield client
-    keys = client.keys("testns:*")
-    for k in keys:
+    for k in client.scan_iter("testns:*"):
+        client.delete(k)
+    for k in client.scan_iter("qtask:hist:testns:*"):
         client.delete(k)
 
 
@@ -94,18 +95,16 @@ class TestWorker:
         assert r.llen("testns:exception_test:retry") == 1
 
     def test_worker_with_multiple_handlers(self, redis_url, r):
-        q = SmartQueue(redis_url, "multi_test", namespace="testns")
-        
         worker = Worker(redis_url, "multi_test", namespace="testns")
-        
+
         @worker.on("task_a")
         def handler_a(task):
             return {"from": "a"}
-        
+
         @worker.on("task_b")
         def handler_b(task):
             return {"from": "b"}
-        
+
         assert "task_a" in worker.handlers
         assert "task_b" in worker.handlers
         assert worker.handlers["task_a"]("test")["from"] == "a"
@@ -145,13 +144,27 @@ class TestWorkerLifecycle:
         @worker.on("test")
         def handler(task):
             return None
-        
-        assert worker.running == False
-        
+
+        assert not worker.running
+
         # 模拟启动
         worker.running = True
-        assert worker.running == True
-        
+        assert worker.running
+
         # 模拟停止
         worker.stop()
-        assert worker.running == False
+        assert not worker.running
+
+    def test_worker_empty_payload_is_failed_not_left_processing(self, redis_url, r):
+        worker = Worker(redis_url, "empty_payload", namespace="testns", max_retry=1)
+        worker.queue.push({})
+
+        worker._poll_once()
+
+        assert r.llen("testns:empty_payload:processing:" + worker.worker_id) == 0
+        assert r.llen("testns:empty_payload:dlq") == 1
+
+    def test_worker_uses_worker_specific_processing_key(self, redis_url):
+        worker = Worker(redis_url, "specific_processing", namespace="testns", worker_id="worker-a")
+
+        assert worker.queue.processing == "testns:specific_processing:processing:worker-a"

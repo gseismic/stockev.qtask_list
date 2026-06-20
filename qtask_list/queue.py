@@ -1,8 +1,9 @@
 import json
 import time
 import uuid
+from typing import Any, Dict, List, Optional, cast
+
 import redis
-from typing import Optional, Any, Dict, List
 from loguru import logger
 
 from .history import TaskHistory
@@ -30,8 +31,10 @@ class SmartQueue:
         large_threshold: int = 50 * 1024,
         max_retry: int = 3,
         ttl_days: int = 15,
-        redis_client: Optional[redis.Redis] = None,
+        redis_client: Optional[Any] = None,
+        processing_key: Optional[str] = None,
     ):
+        self.r: Any
         if redis_client is not None:
             self.r = redis_client
         elif redis_url:
@@ -43,7 +46,8 @@ class SmartQueue:
         self.base = f"{self.namespace}:{queue_name}" if self.namespace else queue_name
 
         self.queue = self.base
-        self.processing = f"{self.base}:processing"
+        self.default_processing = f"{self.base}:processing"
+        self.processing = processing_key or self.default_processing
         self.retry = f"{self.base}:retry"
         self.dlq = f"{self.base}:dlq"
         self.delay = f"{self.base}:delay"
@@ -136,10 +140,62 @@ class SmartQueue:
     def _load_large_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if payload.get("_large") and self.storage:
             raw = self.storage.load(payload["key"])
-            return json.loads(raw)
+            return cast(Dict[str, Any], json.loads(raw))
         return payload
 
-    def pop(self, timeout: int = 10) -> Optional[tuple]:
+    def _decode_message(self, msg: str) -> Dict[str, Any]:
+        data = cast(Dict[str, Any], json.loads(msg))
+        if not isinstance(data, dict) or not data.get("task_id"):
+            raise ValueError("task_id is required")
+        payload_raw = data.get("payload", {})
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        if not isinstance(payload, dict):
+            raise ValueError("payload must decode to a JSON object")
+        data["payload"] = self._load_large_payload(payload)
+        return data
+
+    def _move_poison_to_dlq(self, raw_msg: str, reason: str):
+        """Move an unreadable processing message to DLQ so it cannot block recovery."""
+        removed = self._move_from_processing(self.dlq, raw_msg, raw_msg, push_side="left")
+        if not removed:
+            return
+
+        try:
+            data = json.loads(raw_msg)
+        except (json.JSONDecodeError, TypeError):
+            logger.error(f"Moved malformed task message to DLQ: {reason}")
+            return
+        if not isinstance(data, dict):
+            logger.error(f"Moved non-object task message to DLQ: {reason}")
+            return
+
+        task_id = data.get("task_id")
+        if task_id:
+            self.history.update(task_id, {"status": "failed", "reason": reason})
+
+    def _move_from_processing(
+        self,
+        destination: str,
+        raw_msg: str,
+        destination_msg: str,
+        push_side: str,
+    ) -> bool:
+        lua_script = """
+        local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+        if removed == 0 then
+            return 0
+        end
+        if ARGV[3] == 'left' then
+            redis.call('LPUSH', KEYS[2], ARGV[2])
+        else
+            redis.call('RPUSH', KEYS[2], ARGV[2])
+        end
+        return removed
+        """
+        result = self.r.eval(lua_script, 2, self.processing, destination, raw_msg, destination_msg, push_side)
+        return bool(result)
+
+    def pop(self, timeout: int = 10) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         """
         从队列获取任务
         """
@@ -149,59 +205,93 @@ class SmartQueue:
             if not msg:
                 return None, None
 
-            data = json.loads(msg)
-            payload = json.loads(data["payload"])
-            payload = self._load_large_payload(payload)
+            try:
+                data = self._decode_message(msg)
+            except Exception as e:
+                logger.error(f"Pop decode failed: {e}")
+                self._move_poison_to_dlq(msg, str(e))
+                return None, None
 
-            return payload, msg
+            return data["payload"], msg
         except Exception as e:
             logger.error(f"Pop failed: {e}")
             return None, None
 
-    def pop_no_wait(self) -> Optional[tuple]:
+    def pop_no_wait(self) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         """非阻塞 pop"""
         try:
             msg = self.r.rpoplpush(self.queue, self.processing)
             if not msg:
                 return None, None
 
-            data = json.loads(msg)
-            payload = json.loads(data["payload"])
-            payload = self._load_large_payload(payload)
+            try:
+                data = self._decode_message(msg)
+            except Exception as e:
+                logger.error(f"Pop no wait decode failed: {e}")
+                self._move_poison_to_dlq(msg, str(e))
+                return None, None
 
-            return payload, msg
+            return data["payload"], msg
         except Exception as e:
             logger.error(f"Pop no wait failed: {e}")
             return None, None
 
     # ==================== Ack ====================
 
-    def ack(self, raw_msg: str):
+    def ack(self, raw_msg: str) -> bool:
         """确认任务完成"""
-        self.r.lrem(self.processing, 1, raw_msg)
+        removed = self.r.lrem(self.processing, 1, raw_msg)
+        if not removed:
+            logger.warning("Ack ignored because task is not in processing")
+            return False
 
-        data = json.loads(raw_msg)
-        self.history.update(data["task_id"], {"status": "completed"})
+        try:
+            data = json.loads(raw_msg)
+            task_id = data.get("task_id") if isinstance(data, dict) else None
+            if not task_id:
+                raise ValueError("task_id is required")
+        except Exception as e:
+            logger.error(f"Ack history update skipped: {e}")
+            return True
+
+        self.history.update(task_id, {"status": "completed"})
+        return True
 
     # ==================== Fail ====================
 
-    def fail(self, raw_msg: str, reason: str = ""):
+    def fail(self, raw_msg: str, reason: str = "") -> bool:
         """标记任务失败"""
-        data = json.loads(raw_msg)
-        payload = json.loads(data["payload"])
+        try:
+            data = json.loads(raw_msg)
+            task_id = data.get("task_id") if isinstance(data, dict) else None
+            if not task_id:
+                raise ValueError("task_id is required")
+            payload_raw = data.get("payload", {})
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+            if not isinstance(payload, dict):
+                raise ValueError("payload must decode to a JSON object")
+        except Exception as e:
+            logger.error(f"Fail decode failed: {e}")
+            self._move_poison_to_dlq(raw_msg, str(e))
+            return False
 
         retry = payload.get("_retry", 0) + 1
         payload["_retry"] = retry
-
-        self.r.lrem(self.processing, 1, raw_msg)
+        new_msg = json.dumps({"task_id": task_id, "payload": json.dumps(payload)})
 
         if retry >= self.max_retry:
-            self.r.lpush(self.dlq, raw_msg)
-            self.history.update(data["task_id"], {"status": "failed", "reason": reason})
+            moved = self._move_from_processing(self.dlq, raw_msg, new_msg, push_side="left")
+            if not moved:
+                logger.warning("Fail ignored because task is not in processing")
+                return False
+            self.history.update(task_id, {"status": "failed", "reason": reason})
         else:
-            new_msg = json.dumps({"task_id": data["task_id"], "payload": json.dumps(payload)})
-            self.r.rpush(self.retry, new_msg)
-            self.history.update(data["task_id"], {"status": "retry"})
+            moved = self._move_from_processing(self.retry, raw_msg, new_msg, push_side="right")
+            if not moved:
+                logger.warning("Fail ignored because task is not in processing")
+                return False
+            self.history.update(task_id, {"status": "retry"})
+        return True
 
     # ==================== Retry ====================
 
@@ -260,27 +350,54 @@ class SmartQueue:
             count += 1
         return count
 
+    def recover_processing_key(self, processing_key: str) -> int:
+        """恢复指定 processing 队列中的任务。"""
+        count = 0
+        while True:
+            msg = self.r.rpoplpush(processing_key, self.queue)
+            if not msg:
+                break
+            count += 1
+        return count
+
+    def processing_keys(self, include_legacy: bool = True) -> List[str]:
+        """返回当前队列的所有 processing keys。"""
+        keys = set(self.r.scan_iter(f"{self.base}:processing:*"))
+        if include_legacy:
+            keys.add(self.default_processing)
+        return sorted(keys)
+
+    def recover_stale_processing(self, heartbeat_prefix: str) -> int:
+        """恢复没有活跃 heartbeat 的 worker-specific processing 队列。"""
+        count = 0
+        for key in self.processing_keys(include_legacy=False):
+            worker_id = key.rsplit(":", 1)[-1]
+            if self.r.exists(f"{heartbeat_prefix}{worker_id}"):
+                continue
+            count += self.recover_processing_key(key)
+        return count
+
     # ==================== Queue Management ====================
 
     def size(self) -> int:
         """主队列大小"""
-        return self.r.llen(self.queue)
+        return int(self.r.llen(self.queue))
 
     def processing_size(self) -> int:
         """处理中队列大小"""
-        return self.r.llen(self.processing)
+        return sum(self.r.llen(key) for key in self.processing_keys())
 
     def retry_size(self) -> int:
         """重试队列大小"""
-        return self.r.llen(self.retry)
+        return int(self.r.llen(self.retry))
 
     def dlq_size(self) -> int:
         """死信队列大小"""
-        return self.r.llen(self.dlq)
+        return int(self.r.llen(self.dlq))
 
     def delay_size(self) -> int:
         """延迟队列大小"""
-        return self.r.zcard(self.delay)
+        return int(self.r.zcard(self.delay))
 
     def get_stats(self) -> dict:
         """获取队列统计"""
@@ -295,7 +412,8 @@ class SmartQueue:
     def clear(self, include_dlq: bool = True):
         """清空队列"""
         self.r.delete(self.queue)
-        self.r.delete(self.processing)
+        for key in self.processing_keys():
+            self.r.delete(key)
         self.r.delete(self.retry)
         self.r.delete(self.delay)
         if include_dlq:

@@ -1,7 +1,9 @@
 import time
 import json
+from typing import Any, Dict, List, Optional, cast
+
 import redis
-from typing import Optional, List, Dict, Any
+
 from loguru import logger
 
 
@@ -13,8 +15,9 @@ class TaskHistory:
         redis_url: Optional[str] = None,
         queue_name: str = "",
         ttl_days: int = 15,
-        redis_client: Optional[redis.Redis] = None,
+        redis_client: Optional[Any] = None,
     ):
+        self.r: Any
         if redis_client is not None:
             self.r = redis_client
         elif redis_url:
@@ -53,7 +56,7 @@ class TaskHistory:
         pipe.expire(self.idx_key, self.ttl_seconds)
         pipe.execute()
 
-    def update(self, task_id: str, fields: dict):
+    def update(self, task_id: str, fields: dict) -> bool:
         """更新任务状态 (原子操作)"""
         key = f"{self.task_key_prefix}{task_id}"
 
@@ -65,13 +68,33 @@ class TaskHistory:
                 return json.dumps(v)
             return v
 
-        # 使用 hset 直接更新特定字段，保证原子性并减少 RTT
         mapping = {k: serialize_value(v) for k, v in fields.items()}
         mapping["updated_at"] = time.time()
+        hset_args = []
+        for field, value in mapping.items():
+            hset_args.extend([field, value])
 
-        # 只有当 key 存在时才更新（可选，根据业务逻辑决定）
-        # 这里简单处理，直接 hset
-        self.r.hset(key, mapping=mapping)
+        lua_script = """
+        if redis.call('EXISTS', KEYS[1]) == 0 then
+            return 0
+        end
+        redis.call('HSET', KEYS[1], unpack(ARGV, 4))
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+        redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
+        redis.call('EXPIRE', KEYS[2], ARGV[1])
+        return 1
+        """
+        result = self.r.eval(
+            lua_script,
+            2,
+            key,
+            self.idx_key,
+            self.ttl_seconds,
+            mapping["updated_at"],
+            task_id,
+            *hset_args,
+        )
+        return bool(result)
 
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取任务详情 (支持 Hash 和 String 格式)"""
@@ -94,7 +117,7 @@ class TaskHistory:
             if not raw_data:
                 return None
             try:
-                return json.loads(raw_data)
+                return cast(Dict[str, Any], json.loads(raw_data))
             except (json.JSONDecodeError, TypeError):
                 return {"_raw": raw_data}
 

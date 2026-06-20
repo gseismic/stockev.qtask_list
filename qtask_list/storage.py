@@ -16,14 +16,14 @@ class RemoteStorage:
         files = {"file": ("payload.bin", data)}
         r = self.session.post(url, files=files, timeout=self.timeout)
         r.raise_for_status()
-        return r.json()["key"]
+        return str(r.json()["key"])
 
     def load(self, key: str) -> bytes:
         """根据 key 下载数据"""
         url = f"{self.api_base_url}/api/storage/download/{key}"
         r = self.session.get(url, timeout=self.timeout)
         r.raise_for_status()
-        return r.content
+        return bytes(r.content)
 
     def delete(self, key: str):
         """删除数据"""

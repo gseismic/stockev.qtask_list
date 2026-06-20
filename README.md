@@ -53,19 +53,21 @@ pip install -e ".[dashboard]"     # Dashboard 支持 (fastapi, uvicorn)
 | `storage.py` | `RemoteStorage` | HTTP 客户端，大于 50KB 的 payload 自动外存 |
 | `archiver.py` | `ArchiveManager` | Redis 任务历史 → SQLite 归档 |
 | `archiver.py` | `Monitor` | Redis `INFO MEMORY` 内存监控 |
-| `cli/__main__.py` | Typer CLI | 10 个子命令：status/watch/clear/requeue/retry/recover/history/worker/archive/monitor/dashboard |
+| `cli/__main__.py` | Typer CLI | 任务生命周期控制台：push/peek/status/requeue/retry/recover/history/task/worker/archive/monitor/dashboard |
 
 ### 队列结构
 
-每条逻辑队列在 Redis 中对应 **5 个子队列**：
+每条逻辑队列在 Redis 中对应主队列和若干状态队列：
 
 | 子队列 Key | 数据结构 | 用途 |
 |-----------|---------|------|
 | `{ns}:{name}` | List | 主队列，待消费任务 |
-| `{ns}:{name}:processing` | List | 正在处理（Worker 取走后暂存，崩溃恢复用） |
+| `{ns}:{name}:processing` | List | 默认 processing 队列（SmartQueue 直接使用 / 兼容旧版本） |
+| `{ns}:{name}:processing:{worker_id}` | List | Worker 专属 processing 队列，避免多 Worker 启动时误恢复活跃任务 |
 | `{ns}:{name}:retry` | List | 重试队列（失败但未达 max_retry） |
 | `{ns}:{name}:dlq` | List | 死信队列（重试耗尽） |
 | `{ns}:{name}:delay` | Sorted Set | 延迟队列（按时间戳排序，Lua 脚本原子迁移） |
+| `{ns}:{name}:worker:{worker_id}` | String + TTL | Worker heartbeat，用于判断 processing 是否已失联 |
 
 ### 任务生命周期
 
@@ -147,7 +149,7 @@ q.get_stats()      # 返回 {"queue": N, "processing": N, "retry": N, "dlq": N, 
 
 **关键设计决策：**
 
-- `pop()` 使用 `BRPOPLPUSH`（非 `BLPOP`），取任务的同时推入 `processing` 队列。Worker 崩溃后可通过 `recover()` 恢复。
+- `pop()` 使用 `BRPOPLPUSH`（非 `BLPOP`），取任务的同时推入 `processing` 队列。Worker 使用带 heartbeat 的专属 processing key，只自动恢复已失联 Worker 的任务。
 - `move_delay()` 使用 Redis **Lua 脚本**，原子地将到期任务从 ZSET 迁移到主队列。
 - 大 payload 自动外存：push 时超过 `large_threshold` 则上传到 `RemoteStorage`，队列中仅存引用。
 
@@ -189,8 +191,8 @@ worker.run()
 **关键设计决策：**
 
 - **信号量背压**：`Semaphore(max_workers * 2)` 限制线程池排队深度，防止任务无限积压。
-- **启动自动 recovery**：`run()` 立即调用 `q.recover()`，恢复上次崩溃遗留的 processing 任务。
-- **优雅停止**：`SIGINT/SIGTERM` 信号 → `stop()` → 设置 `_shutdown_event` → 维护线程退出。
+- **启动自动 recovery**：`run()` 只恢复 heartbeat 已过期的 `processing:{worker_id}`，避免抢回其他活跃 Worker 正在处理的任务。
+- **优雅停止**：`SIGINT/SIGTERM` 信号 → `stop()`；线程池 drain 期间继续刷新 heartbeat，任务处理完成后再清理 Worker 状态。
 - **maintenance_interval**：默认 30 分钟执行一次归档和内存检查。
 
 ### TaskHistory — 任务历史
@@ -305,27 +307,44 @@ qtask status
 # 查看指定队列
 qtask status stockev_list:fetch
 
+# 投递测试任务
+qtask push stockev_list:fetch '{"action":"fetch_stock","symbol":"AAPL"}'
+qtask push stockev_list:fetch --file task.json --delay 60
+
+# 查看队列中的实际消息
+qtask peek stockev_list:fetch --state ready -l 20
+qtask peek stockev_list:fetch --state dlq --json
+
 # 实时监控 (2 秒刷新)
 qtask watch stockev_list:fetch -i 2
 
-# 清空队列
+# 清空队列；需要同时删除历史时显式加 --include-history
 qtask clear stockev_list:fetch --force
+qtask clear stockev_list:fetch --include-history --force
 
 # DLQ 重新入队
 qtask requeue stockev_list:fetch --force
+qtask requeue stockev_list:fetch --task-id <task_id> --force
 
 # retry 队列 → 主队列
 qtask retry stockev_list:fetch
 
-# Crash recovery (processing → 主队列)
+# Crash recovery：默认只恢复 stale worker 的 processing，避免抢活跃 Worker 任务
 qtask recover stockev_list:fetch
+qtask recover stockev_list:fetch --force-active
 
 # 查看历史
 qtask history stockev_list:fetch
 qtask history stockev_list:fetch -l 50
+qtask history -t <task_id>
 
-# 启动 Worker
-qtask worker -q fetch -n stockev_list -w 4
+# 单任务查看、重放、删除
+qtask task get <task_id>
+qtask task requeue <task_id> --queue stockev_list:fetch --from dlq --force
+qtask task delete <task_id> --queue stockev_list:fetch --force
+
+# 启动用户代码中已注册 handler 的 Worker
+qtask worker --module myapp.workers:worker
 
 # 清理过期历史
 qtask clean-history stockev_list:fetch -t 15
