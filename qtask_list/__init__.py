@@ -55,7 +55,7 @@ def start_dashboard(
         env["QTASK_DASHBOARD_SECURE_COOKIE"] = "1"
     
     # 启动 dashboard
-    display_host = "localhost" if host in {"0.0.0.0", "::"} else host
+    display_host = "localhost" if host in {"0.0.0.0", "::", "127.0.0.1"} else host
     print(f"Starting qtask_list Dashboard on http://{display_host}:{port}")
     print(f"Redis: {redis_url}")
     print(f"Auth: {'enabled' if password else 'disabled'}")

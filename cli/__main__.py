@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib
 import json
 import os
@@ -7,7 +9,7 @@ import webbrowser
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 import redis
 import typer
@@ -15,8 +17,11 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
-try:
+if TYPE_CHECKING:
     from qtask_list import SmartQueue, Worker
+
+try:
+    from qtask_list import SmartQueue, Worker  # noqa: F811
 
     QTASK_LIST_AVAILABLE = True
 except ImportError:
@@ -877,8 +882,10 @@ def dashboard(
         console.print("[red]Error: fastapi/uvicorn not installed. Run: pip install qtask_list[dashboard][/red]")
         raise typer.Exit(1)
 
-    display_host = "localhost" if host in {"0.0.0.0", "::"} else host
-    auth_enabled = bool(os.environ.get("QTASK_DASHBOARD_PASSWORD"))
+    display_host = "localhost" if host in {"0.0.0.0", "::", "127.0.0.1"} else host
+    auth_enabled = bool(os.environ.get("QTASK_DASHBOARD_PASSWORD")) or (
+        os.environ.get("QTASK_DASHBOARD_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
     console.print(f"[green]Starting Dashboard on http://{display_host}:{port}[/green]")
     console.print(f"[cyan]Redis: {redis_url}[/cyan]")
     console.print(f"[cyan]Auth: {'enabled' if auth_enabled else 'disabled'}[/cyan]")
