@@ -1,9 +1,11 @@
+import base64
 import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional, cast
 
 import redis
+import zstandard
 from loguru import logger
 
 from .history import TaskHistory
@@ -29,6 +31,7 @@ class SmartQueue:
         namespace: Optional[str] = None,
         storage: Optional[RemoteStorage] = None,
         large_threshold: int = 50 * 1024,
+        compress_threshold: int = 50 * 1024,
         max_retry: int = 3,
         ttl_days: int = 15,
         redis_client: Optional[Any] = None,
@@ -54,7 +57,11 @@ class SmartQueue:
 
         self.storage = storage
         self.large_threshold = large_threshold
+        self.compress_threshold = compress_threshold
         self.max_retry = max_retry
+
+        self._cctx = zstandard.ZstdCompressor()
+        self._dctx = zstandard.ZstdDecompressor()
 
         self.history = TaskHistory(redis_client=self.r, queue_name=self.base, ttl_days=ttl_days)
 
@@ -62,7 +69,8 @@ class SmartQueue:
 
     def push(self, payload: Dict[str, Any], delay_seconds: int = 0) -> str:
         """
-        推送任务到队列
+        推送任务到队列。超过 compress_threshold 的 payload 自动 zstd 压缩，
+        优先使用 RemoteStorage（若配置），否则退化为压缩存储。
         """
         try:
             task_id = str(uuid.uuid4())
@@ -74,7 +82,11 @@ class SmartQueue:
             if self.storage and len(data) > self.large_threshold:
                 key = self.storage.save_bytes(data)
                 payload = {"_large": True, "key": key}
-                payload_json = json.dumps(payload)
+            elif len(data) > self.compress_threshold:
+                compressed = self._cctx.compress(data)
+                payload = {"_compressed": True, "data": base64.b64encode(compressed).decode("ascii")}
+
+            payload_json = json.dumps(payload)
 
             msg = json.dumps({"task_id": task_id, "payload": payload_json})
 
@@ -106,7 +118,11 @@ class SmartQueue:
             if self.storage and len(data) > self.large_threshold:
                 key = self.storage.save_bytes(data)
                 payload = {"_large": True, "key": key}
-                payload_json = json.dumps(payload)
+            elif len(data) > self.compress_threshold:
+                compressed = self._cctx.compress(data)
+                payload = {"_compressed": True, "data": base64.b64encode(compressed).decode("ascii")}
+
+            payload_json = json.dumps(payload)
 
             msg = json.dumps({"task_id": task_id, "payload": payload_json})
 
@@ -140,6 +156,10 @@ class SmartQueue:
     def _load_large_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if payload.get("_large") and self.storage:
             raw = self.storage.load(payload["key"])
+            return cast(Dict[str, Any], json.loads(raw))
+        if payload.get("_compressed"):
+            compressed = base64.b64decode(payload["data"])
+            raw = self._dctx.decompress(compressed)
             return cast(Dict[str, Any], json.loads(raw))
         return payload
 
