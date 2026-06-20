@@ -11,7 +11,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from qtask_list import SmartQueue, Worker
+from qtask_list import SmartQueue
 
 REDIS_URL = "redis://localhost:6379/0"
 
@@ -46,9 +46,9 @@ def main():
     print(f"  {FINANCE_NS}:calculate (will be populated by fetch worker)")
     print(f"  {STOCKEV_NS}:store (will be populated by calculate worker)")
     print("\nRun workers in order:")
-    print(f"  1. python examples/stockev/store_worker.py")
-    print(f"  2. python examples/finance/calculate_worker.py")
-    print(f"  3. python examples/stockev/fetch_worker.py")
+    print("  1. python examples/stockev/store_worker.py")
+    print("  2. python examples/finance/calculate_worker.py")
+    print("  3. python examples/stockev/fetch_worker.py")
 
 
 if __name__ == "__main__":

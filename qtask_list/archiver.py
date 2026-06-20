@@ -5,7 +5,7 @@ import json
 import redis
 from loguru import logger
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 
 class Monitor:
@@ -124,17 +124,17 @@ class ArchiveManager:
                 
                 if rtype == "hash":
                     # 将 Hash 数据各字段反序列化（如果是 JSON 字符串）
-                    decoded = {}
+                    decoded: Dict[str, Any] = {}
                     for k, v in data.items():
                         try:
                             decoded[k] = json.loads(v)
-                        except:
+                        except (json.JSONDecodeError, TypeError):
                             decoded[k] = v
                     raw_tasks.append(decoded)
                 elif rtype == "string":
                     try:
                         raw_tasks.append(json.loads(data))
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         raw_tasks.append({"payload": data})
                 else:
                     raw_tasks.append(None)
@@ -143,7 +143,8 @@ class ArchiveManager:
             db_sessions = {} # date_str -> List[tuple]
             
             for i, raw in enumerate(raw_tasks):
-                if not raw: continue
+                if not raw:
+                    continue
                 tid = task_ids[i]
                 
                 # 解析字段

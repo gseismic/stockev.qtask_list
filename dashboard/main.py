@@ -5,7 +5,6 @@ from typing import Optional
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from qtask_list.archiver import Monitor
@@ -44,7 +43,7 @@ def get_all_queues():
         try:
             if r.type(key) == "list":
                 queues.add(key)
-        except:
+        except redis.RedisError:
             continue
             
     return sorted(queues)
@@ -75,7 +74,7 @@ def get_queue_tasks(queue_name: str, limit: int = 50) -> list:
                 payload_str = data.get("payload", "{}")
                 try:
                     payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
-                except:
+                except (json.JSONDecodeError, TypeError):
                     payload = {}
                 task = {
                     "task_id": data.get("task_id", ""),
@@ -142,12 +141,12 @@ def get_queue_tasks(queue_name: str, limit: int = 50) -> list:
                 for k, v in data.items():
                     try:
                         task[k] = json.loads(v)
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         task[k] = v
             elif rtype == "string":
                 try:
                     task = json.loads(data)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     continue
             
             if task:
@@ -205,11 +204,11 @@ def get_task_detail(task_id: str) -> Optional[dict]:
     if rt == "hash":
         data = r.hgetall(key)
         if data:
-            res = {}
+            res: dict = {}
             for k, v in data.items():
                 try:
                     res[k] = json.loads(v)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     res[k] = v
             return res
     else:
@@ -258,12 +257,12 @@ def get_task_by_queue(queue_name: str, limit: int = 50) -> list:
             for k, v in data.items():
                 try:
                     task[k] = json.loads(v)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     task[k] = v
         elif rtype == "string":
             try:
                 task = json.loads(data)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 continue
         if task:
             results.append(task)
@@ -343,7 +342,7 @@ def api_actions():
                 actions.add(task["action"])
             if len(actions) > 50: # 限制数量
                 break
-        except:
+        except Exception:
             continue
     return sorted([a for a in actions if a])
 

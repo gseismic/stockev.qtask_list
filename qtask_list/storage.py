@@ -29,6 +29,8 @@ class RemoteStorage:
         """删除数据"""
         url = f"{self.api_base_url}/api/storage/delete/{key}"
         try:
-            self.session.delete(url, timeout=self.timeout)
-        except Exception:
-            pass
+            resp = self.session.delete(url, timeout=self.timeout)
+            resp.raise_for_status()
+        except Exception as e:
+            from loguru import logger
+            logger.error(f"Failed to delete key {key}: {e}")

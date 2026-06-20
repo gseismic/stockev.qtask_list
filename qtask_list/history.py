@@ -1,7 +1,7 @@
 import time
 import json
 import redis
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from loguru import logger
 
 
@@ -73,7 +73,7 @@ class TaskHistory:
         # 这里简单处理，直接 hset
         self.r.hset(key, mapping=mapping)
 
-    def get(self, task_id: str) -> dict:
+    def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取任务详情 (支持 Hash 和 String 格式)"""
         key = f"{self.task_key_prefix}{task_id}"
         rt = self.r.type(key)
@@ -82,11 +82,11 @@ class TaskHistory:
             raw_data = self.r.hgetall(key)
             if not raw_data:
                 return None
-            result = {}
+            result: Dict[str, Any] = {}
             for k, v in raw_data.items():
                 try:
                     result[k] = json.loads(v)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     result[k] = v
             return result
         else:
@@ -95,10 +95,10 @@ class TaskHistory:
                 return None
             try:
                 return json.loads(raw_data)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 return {"_raw": raw_data}
 
-    def list(self, limit: int = 50) -> list:
+    def list(self, limit: int = 50) -> List[Dict[str, Any]]:
         """列出最近的任务历史 (兼容不同存储格式)"""
         task_ids = self.r.zrevrange(self.idx_key, 0, limit - 1)
         if not task_ids:
@@ -119,23 +119,23 @@ class TaskHistory:
                 pipe.get(f"{self.task_key_prefix}{tid}")
 
         raw_results = pipe.execute()
-        result = []
+        result: List[Dict[str, Any]] = []
         for raw in raw_results:
             if not raw:
                 continue
 
             if isinstance(raw, dict):  # Hash
-                item = {}
+                item: Dict[str, Any] = {}
                 for k, v in raw.items():
                     try:
                         item[k] = json.loads(v)
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         item[k] = v
                 result.append(item)
             else:  # String
                 try:
                     result.append(json.loads(raw))
-                except:
+                except (json.JSONDecodeError, TypeError):
                     result.append({"_raw": raw})
 
         return result
@@ -154,7 +154,7 @@ class TaskHistory:
             pipe.zrem(self.idx_key, *task_ids)
             pipe.execute()
 
-    def clean_expired(self, ttl_seconds: int = None) -> int:
+    def clean_expired(self, ttl_seconds: Optional[int] = None) -> int:
         """清理过期历史记录 (分批处理)"""
         if ttl_seconds is None:
             ttl_seconds = self.ttl_seconds

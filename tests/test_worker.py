@@ -1,6 +1,5 @@
 import pytest
 import time
-import threading
 from qtask_list import Worker, SmartQueue
 
 

@@ -4,7 +4,7 @@ import threading
 import redis
 from typing import Callable, Optional, Dict, Any
 from loguru import logger
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor
 
 from .queue import SmartQueue
 from .storage import RemoteStorage
@@ -79,21 +79,21 @@ class Worker:
             if self._semaphore:
                 self._semaphore.release()
 
-    def _process_task(self, payload: dict, raw_msg: str) -> bool:
+    def _process_task(self, payload: Dict[str, Any], raw_msg: str):
         """处理单个任务"""
         action = payload.get("action")
 
         if not action:
             logger.warning("Task has no action, skipping")
             self.queue.fail(raw_msg, "no action")
-            return False
+            return
 
         handler = self.handlers.get(action)
 
         if not handler:
             logger.warning(f"No handler for action: {action}")
             self.queue.fail(raw_msg, f"unknown action: {action}")
-            return False
+            return
 
         try:
             result = handler(payload)
@@ -102,12 +102,10 @@ class Worker:
                 self.result_queue.push(result)
 
             self.queue.ack(raw_msg)
-            return True
 
         except Exception as e:
             logger.error(f"Handler error for {action}: {e}")
             self.queue.fail(raw_msg, str(e))
-            return False
 
     def _maintenance_loop(self):
         """定期清理和归档的维护线程"""

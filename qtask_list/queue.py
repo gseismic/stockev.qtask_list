@@ -133,6 +133,12 @@ class SmartQueue:
 
     # ==================== Pop ====================
 
+    def _load_large_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if payload.get("_large") and self.storage:
+            raw = self.storage.load(payload["key"])
+            return json.loads(raw)
+        return payload
+
     def pop(self, timeout: int = 10) -> Optional[tuple]:
         """
         从队列获取任务
@@ -145,10 +151,7 @@ class SmartQueue:
 
             data = json.loads(msg)
             payload = json.loads(data["payload"])
-
-            if payload.get("_large"):
-                raw = self.storage.load(payload["key"])
-                payload = json.loads(raw)
+            payload = self._load_large_payload(payload)
 
             return payload, msg
         except Exception as e:
@@ -157,18 +160,19 @@ class SmartQueue:
 
     def pop_no_wait(self) -> Optional[tuple]:
         """非阻塞 pop"""
-        msg = self.r.rpoplpush(self.queue, self.processing)
-        if not msg:
+        try:
+            msg = self.r.rpoplpush(self.queue, self.processing)
+            if not msg:
+                return None, None
+
+            data = json.loads(msg)
+            payload = json.loads(data["payload"])
+            payload = self._load_large_payload(payload)
+
+            return payload, msg
+        except Exception as e:
+            logger.error(f"Pop no wait failed: {e}")
             return None, None
-
-        data = json.loads(msg)
-        payload = json.loads(data["payload"])
-
-        if payload.get("_large"):
-            raw = self.storage.load(payload["key"])
-            payload = json.loads(raw)
-
-        return payload, msg
 
     # ==================== Ack ====================
 

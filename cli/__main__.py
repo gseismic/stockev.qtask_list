@@ -1,10 +1,8 @@
 import os
-import sys
 import redis
 import typer
 import time
 import json
-import signal
 import threading
 import webbrowser
 from datetime import datetime
@@ -56,7 +54,7 @@ def list_all_queues(r: redis.Redis) -> List[str]:
         try:
             if r.type(key) == "list":
                 queues.add(key)
-        except:
+        except redis.RedisError:
             continue
             
     return sorted(queues)
@@ -242,11 +240,13 @@ def history(
         if rt == "hash":
             data = r.hgetall(key)
             if data:
+                parsed: Dict[str, Any] = {}
                 for k, v in data.items():
                     try:
-                        data[k] = json.loads(v)
-                    except: pass
-                console.print_json(json.dumps(data, indent=2))
+                        parsed[k] = json.loads(v)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed[k] = v
+                console.print_json(json.dumps(parsed, indent=2))
                 return
         else:
             raw = r.get(key)
