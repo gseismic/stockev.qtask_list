@@ -21,7 +21,7 @@ function Badge({ state }) {
     return h("span", { className: `badge ${state}` }, stateLabel(state));
 }
 
-export function TopBar({ health, autoRefresh, lastUpdate, onRefresh, onToggleAuto }) {
+export function TopBar({ health, auth, autoRefresh, lastUpdate, onRefresh, onToggleAuto, onLogout }) {
     const connected = health?.status === "ok";
     return h("header", { className: "topbar" }, [
         h("div", { className: "brand", key: "brand" }, [
@@ -35,6 +35,7 @@ export function TopBar({ health, autoRefresh, lastUpdate, onRefresh, onToggleAut
             h("span", { className: `badge ${connected ? "completed" : "failed"}`, key: "health" }, connected ? "已连接" : "未连接"),
             h("button", { className: "btn", onClick: onRefresh, key: "refresh" }, "刷新"),
             h("button", { className: autoRefresh ? "btn primary" : "btn", onClick: onToggleAuto, key: "auto" }, autoRefresh ? "自动刷新" : "暂停刷新"),
+            auth?.enabled ? h("button", { className: "btn", onClick: onLogout, key: "logout" }, "退出") : null,
             h("span", { className: "muted", key: "updated" }, lastUpdate || "-"),
         ]),
     ]);

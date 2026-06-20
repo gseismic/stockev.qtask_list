@@ -854,33 +854,48 @@ def monitor(
 
 @app.command()
 def dashboard(
+    host: str = typer.Option("127.0.0.1", "--host", help="Dashboard 监听地址，远程访问可用 0.0.0.0"),
     port: int = typer.Option(8765, "--port", "-p", help="Dashboard 端口"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
+    user: Optional[str] = typer.Option(None, "--user", help="Dashboard 登录用户名"),
+    password: Optional[str] = typer.Option(None, "--password", help="Dashboard 登录密码，设置后启用登录"),
+    session_ttl: int = typer.Option(86400, "--session-ttl", help="登录会话有效期，秒"),
+    secure_cookie: bool = typer.Option(False, "--secure-cookie", help="HTTPS 部署时启用 Secure Cookie"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="启动后打开浏览器"),
 ):
     """启动 Dashboard 面板"""
     os.environ["REDIS_URL"] = redis_url
+    os.environ["QTASK_DASHBOARD_SESSION_TTL"] = str(session_ttl)
+    if user is not None:
+        os.environ["QTASK_DASHBOARD_USER"] = user
+    if password is not None:
+        os.environ["QTASK_DASHBOARD_PASSWORD"] = password
+    if secure_cookie:
+        os.environ["QTASK_DASHBOARD_SECURE_COOKIE"] = "1"
 
     if not QTASK_LIST_AVAILABLE:
         console.print("[red]Error: fastapi/uvicorn not installed. Run: pip install qtask_list[dashboard][/red]")
         raise typer.Exit(1)
 
-    console.print(f"[green]Starting Dashboard on http://localhost:{port}[/green]")
+    display_host = "localhost" if host in {"0.0.0.0", "::"} else host
+    auth_enabled = bool(os.environ.get("QTASK_DASHBOARD_PASSWORD"))
+    console.print(f"[green]Starting Dashboard on http://{display_host}:{port}[/green]")
     console.print(f"[cyan]Redis: {redis_url}[/cyan]")
+    console.print(f"[cyan]Auth: {'enabled' if auth_enabled else 'disabled'}[/cyan]")
     console.print("Press Ctrl+C to stop\n")
 
     if open_browser:
 
         def open_browser_delayed():
             time.sleep(2)
-            webbrowser.open(f"http://localhost:{port}")
+            webbrowser.open(f"http://{display_host}:{port}")
 
         threading.Thread(target=open_browser_delayed, daemon=True).start()
 
     import uvicorn
     from dashboard.main import app
 
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 @task_app.command("get")

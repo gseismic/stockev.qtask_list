@@ -394,6 +394,28 @@ Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localh
 - 安全恢复 stale processing；强制恢复 active processing 需要显式确认。
 - 投递测试任务，支持 delay。
 
+远程查看时应启用登录，并显式监听远程地址：
+
+```bash
+qtask dashboard \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --user admin \
+  --password '<strong-password>' \
+  --no-open
+```
+
+也可以通过环境变量部署：
+
+```bash
+export QTASK_DASHBOARD_USER=admin
+export QTASK_DASHBOARD_PASSWORD='<strong-password>'
+export QTASK_DASHBOARD_SECRET='<random-secret>'
+qtask dashboard --host 0.0.0.0 --no-open
+```
+
+设置 `QTASK_DASHBOARD_PASSWORD` 后，访问 `/` 会先跳转到 `/login`，所有 `/api/*` 管理接口也会校验登录会话。公网部署建议放在 HTTPS 反向代理后，并设置 `QTASK_DASHBOARD_SECURE_COOKIE=1` 或 CLI 参数 `--secure-cookie`。
+
 ## 配置参数
 
 | 参数 | 默认值 | 说明 |
@@ -410,6 +432,11 @@ Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localh
 
 ```bash
 export REDIS_URL=redis://localhost:6379/0
+export QTASK_DASHBOARD_USER=admin
+export QTASK_DASHBOARD_PASSWORD=<strong-password>
+export QTASK_DASHBOARD_SECRET=<random-secret>
+export QTASK_DASHBOARD_SESSION_TTL=86400
+export QTASK_DASHBOARD_SECURE_COOKIE=1
 ```
 
 ## 项目结构

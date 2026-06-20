@@ -7,6 +7,19 @@ from fastapi.testclient import TestClient
 from dashboard.main import app
 
 
+@pytest.fixture(autouse=True)
+def dashboard_auth_env(monkeypatch):
+    for name in [
+        "QTASK_DASHBOARD_AUTH",
+        "QTASK_DASHBOARD_USER",
+        "QTASK_DASHBOARD_PASSWORD",
+        "QTASK_DASHBOARD_SECRET",
+        "QTASK_DASHBOARD_SESSION_TTL",
+        "QTASK_DASHBOARD_SECURE_COOKIE",
+    ]:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
@@ -135,3 +148,49 @@ def test_dashboard_push_task(client, r):
     task_id = response.json()["task_id"]
     assert r.llen(queue) == 1
     assert r.exists(f"qtask:task:{task_id}") == 1
+
+
+def test_dashboard_auth_disabled_by_default(client):
+    response = client.get("/api/auth")
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+    queues = client.get("/api/queues")
+    assert queues.status_code == 200
+
+
+def test_dashboard_auth_requires_login(monkeypatch):
+    monkeypatch.setenv("QTASK_DASHBOARD_USER", "ops")
+    monkeypatch.setenv("QTASK_DASHBOARD_PASSWORD", "secret")
+    monkeypatch.setenv("QTASK_DASHBOARD_SECRET", "test-secret")
+    client = TestClient(app)
+
+    index = client.get("/", follow_redirects=False)
+    assert index.status_code in {302, 307}
+    assert index.headers["location"] == "/login"
+
+    queues = client.get("/api/queues")
+    assert queues.status_code == 401
+
+    failed = client.post("/api/login", json={"username": "ops", "password": "bad"})
+    assert failed.status_code == 401
+    assert "qtask_dashboard_session" not in client.cookies
+
+    logged_in = client.post("/api/login", json={"username": "ops", "password": "secret"})
+    assert logged_in.status_code == 200
+    assert logged_in.json()["authenticated"] is True
+    assert "qtask_dashboard_session" in client.cookies
+
+    auth = client.get("/api/auth")
+    assert auth.status_code == 200
+    assert auth.json()["authenticated"] is True
+
+    queues = client.get("/api/queues")
+    assert queues.status_code == 200
+
+    logout = client.post("/api/logout")
+    assert logout.status_code == 200
+    assert "qtask_dashboard_session" not in client.cookies
+
+    queues = client.get("/api/queues")
+    assert queues.status_code == 401

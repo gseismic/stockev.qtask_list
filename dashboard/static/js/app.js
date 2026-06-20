@@ -23,6 +23,7 @@ function chooseQueue(queues) {
 }
 
 function App() {
+    const [authInfo, setAuthInfo] = useState({ enabled: false, authenticated: true });
     const [health, setHealth] = useState({ status: "loading" });
     const [queues, setQueues] = useState([]);
     const [selectedQueue, setSelectedQueue] = useState("");
@@ -92,6 +93,12 @@ function App() {
 
     const refresh = useCallback(async () => {
         try {
+            const authData = await api.auth();
+            setAuthInfo(authData);
+            if (authData.enabled && !authData.authenticated) {
+                window.location.href = "/login";
+                return;
+            }
             const healthData = await api.health();
             setHealth(healthData);
             await loadQueues();
@@ -169,6 +176,10 @@ function App() {
             notify(`Payload JSON 无效：${error.message}`);
         }
     };
+    const logout = async () => {
+        await api.logout();
+        window.location.href = authInfo.enabled ? "/login" : "/";
+    };
     const toggleCurrentOnly = () => {
         const nextValue = !showCurrentOnly;
         setShowCurrentOnly(nextValue);
@@ -190,10 +201,12 @@ function App() {
     return h("div", { className: "app" }, [
         h(TopBar, {
             health,
+            auth: authInfo,
             autoRefresh,
             lastUpdate,
             onRefresh: refresh,
             onToggleAuto: () => setAutoRefresh((value) => !value),
+            onLogout: logout,
             key: "topbar",
         }),
         h(SystemBanner, { health, key: "system" }),

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 qtask_list Dashboard</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="login-page">
+    <main class="login-shell">
+        <section class="login-panel">
+            <div class="brand login-brand">
+                <div class="brand-mark">Q</div>
+                <div>
+                    <div class="brand-title">qtask_list</div>
+                    <div class="brand-subtitle">Dashboard 登录</div>
+                </div>
+            </div>
+            <form id="login-form" class="login-form">
+                <label>
+                    <span>用户名</span>
+                    <input class="input" name="username" autocomplete="username" value="{{ username }}" required>
+                </label>
+                <label>
+                    <span>密码</span>
+                    <input class="input" name="password" type="password" autocomplete="current-password" required autofocus>
+                </label>
+                <button class="btn primary login-button" type="submit">登录</button>
+                <p id="login-error" class="login-error">{{ config_error or "" }}</p>
+            </form>
+        </section>
+    </main>
+    <script>
+        const form = document.getElementById("login-form");
+        const errorBox = document.getElementById("login-error");
+        const nextUrl = new URLSearchParams(window.location.search).get("next") || "/";
+
+        async function checkAuth() {
+            const response = await fetch("/api/auth");
+            const data = await response.json();
+            if (!data.enabled || data.authenticated) {
+                window.location.replace("/");
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            errorBox.textContent = "";
+            const formData = new FormData(form);
+            const response = await fetch("/api/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    username: formData.get("username"),
+                    password: formData.get("password"),
+                }),
+            });
+            if (response.ok) {
+                const safeNext = nextUrl.startsWith("/") && !nextUrl.startsWith("//") ? nextUrl : "/";
+                window.location.replace(safeNext);
+                return;
+            }
+            const data = await response.json().catch(() => ({}));
+            errorBox.textContent = data.detail || "登录失败";
+        });
+
+        checkAuth().catch(() => undefined);
+    </script>
+</body>
+</html>

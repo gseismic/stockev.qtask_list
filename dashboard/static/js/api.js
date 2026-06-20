@@ -9,6 +9,10 @@ async function request(path, options = {}) {
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+        if (response.status === 401 && path !== "/api/login") {
+            const next = `${window.location.pathname}${window.location.search}`;
+            window.location.href = `/login?next=${encodeURIComponent(next)}`;
+        }
         const detail = data.detail || response.statusText;
         throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
@@ -18,6 +22,13 @@ async function request(path, options = {}) {
 const queuePath = (queue) => encodeURIComponent(queue);
 
 export const api = {
+    auth: () => request("/api/auth"),
+    login: (username, password) =>
+        request("/api/login", {
+            method: "POST",
+            body: JSON.stringify({ username, password }),
+        }),
+    logout: () => request("/api/logout", { method: "POST" }),
     health: () => request("/api/health"),
     queues: () => request("/api/queues"),
     workers: (queue = "") => request(`/api/workers${queue ? `?queue=${queuePath(queue)}` : ""}`),
