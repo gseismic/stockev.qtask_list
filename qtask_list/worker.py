@@ -80,8 +80,9 @@ class Worker:
         self.queue.r.delete(self._heartbeat_key)
 
     def _signal_handler(self, signum, frame):
-        logger.info(f"Received signal {signum}, stopping worker...")
-        self.stop()
+        sig_name = signal.Signals(signum).name
+        logger.info(f"收到信号 {sig_name}({signum})，正在停止 worker {self.worker_id}...")
+        self.stop(reason=f"signal:{sig_name}")
 
     def on(self, action: str):
         """注册任务处理器"""
@@ -138,16 +139,25 @@ class Worker:
         logger.info("Maintenance thread started")
 
         last_maintenance = 0
+        _heartbeat_log_interval = max(60, self.heartbeat_interval)
+        _last_heartbeat_log = 0
         while self.running or self._draining:
             try:
                 self._refresh_heartbeat()
 
                 if self.running:
+                    now = time.time()
+                    if now - _last_heartbeat_log > _heartbeat_log_interval:
+                        logger.debug(
+                            f"Worker heartbeat: {self.worker_id} "
+                            f"queue={self.queue.base}"
+                        )
+                        _last_heartbeat_log = now
+
                     # 检查内存
                     monitor.check_health()
 
                     # 定期归档
-                    now = time.time()
                     if now - last_maintenance > self.maintenance_interval:
                         count = archiver.archive_to_sqlite(self.queue.base, days_ago=1)
                         if count > 0:
@@ -192,11 +202,21 @@ class Worker:
         """Worker 主循环"""
         logger.info(f"Worker started, listening on {self.queue.base} as {self.worker_id}")
 
+        _idle_count = 0
         while self.running:
             try:
-                self._poll_once()
+                got_task = self._poll_once()
+                if got_task:
+                    _idle_count = 0
+                else:
+                    _idle_count += 1
+                    if _idle_count % 60 == 0:
+                        logger.debug(
+                            f"Worker 空闲中: {self.queue.base} "
+                            f"(已空闲 {_idle_count * 2}s, 约 {_idle_count} 次轮询)"
+                        )
             except Exception as e:
-                logger.error(f"Worker loop error: {e}")
+                logger.exception(f"Worker loop error: {e}")
 
         logger.info("Worker stopped")
 
@@ -216,6 +236,8 @@ class Worker:
         recovered = self.queue.recover_stale_processing(self._heartbeat_prefix)
         if recovered:
             logger.info(f"Recovered {recovered} tasks from stale processing queues")
+        else:
+            logger.debug("Crash recovery: 无需恢复（无失联 worker 的 processing 任务）")
         self._refresh_heartbeat()
 
         # 启动维护线程
@@ -229,7 +251,7 @@ class Worker:
             self._worker_loop()
         finally:
             self._draining = self.executor is not None
-            self.stop()
+            self.stop(reason="worker_loop_exit")
             if self._draining:
                 self._shutdown_event.clear()
                 self.executor.shutdown(wait=True)
@@ -238,10 +260,11 @@ class Worker:
             maintenance_thread.join(timeout=5)
             self._cleanup_worker_state()
 
-    def stop(self):
+    def stop(self, reason: str = "unknown"):
         """停止 Worker"""
         if not self.running:
             return
 
+        logger.info(f"Worker 正在停止: {self.worker_id} reason={reason}")
         self.running = False
         self._shutdown_event.set()

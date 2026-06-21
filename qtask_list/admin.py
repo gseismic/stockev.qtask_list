@@ -439,6 +439,7 @@ class QueueAdmin:
         update_status: bool = False,
     ) -> int:
         count = 0
+        collected_task_ids: List[str] = []
         while True:
             msg = self.r.rpoplpush(source, queue_name)
             if not msg:
@@ -447,7 +448,9 @@ class QueueAdmin:
             if update_status:
                 task_id = self._message_task_id(msg)
                 if task_id:
-                    self._update_history(task_id, {"status": "pending"})
+                    collected_task_ids.append(task_id)
+        if collected_task_ids:
+            self._batch_update_status(collected_task_ids, queue_name)
         return count
 
     def _move_list_message(self, source: str, destination: str, raw_msg: str) -> bool:
@@ -509,6 +512,30 @@ class QueueAdmin:
             return False
         queue = self._smart_queue(str(queue_name))
         return queue.history.update(task_id, fields)
+
+    def _batch_update_status(self, task_ids: List[str], queue_name: str) -> int:
+        if not task_ids:
+            return 0
+        now = time.time()
+        queue = self._smart_queue(queue_name)
+        ttl_seconds = queue.history.ttl_seconds
+        idx_key = queue.history.idx_key
+        lua_script = """
+        if redis.call('EXISTS', KEYS[1]) == 0 then
+            return 0
+        end
+        redis.call('HSET', KEYS[1], 'status', ARGV[2], 'updated_at', ARGV[1])
+        redis.call('EXPIRE', KEYS[1], ARGV[3])
+        redis.call('ZADD', KEYS[2], ARGV[1], ARGV[4])
+        redis.call('EXPIRE', KEYS[2], ARGV[3])
+        return 1
+        """
+        pipe = self.r.pipeline()
+        for task_id in task_ids:
+            key = f"qtask:task:{task_id}"
+            pipe.eval(lua_script, 2, key, idx_key, now, "pending", ttl_seconds, task_id)
+        results = pipe.execute()
+        return sum(int(result or 0) for result in results)
 
     def _find_history_queue(self, task_id: str) -> Optional[str]:
         for hist_key in self.r.scan_iter("qtask:hist:*"):

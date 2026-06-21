@@ -38,6 +38,8 @@ def cleanup(client):
         for task_id in client.zrange(hist_key, 0, -1):
             client.delete(f"qtask:task:{task_id}")
         client.delete(hist_key)
+    for task_id in ["retry-with-history", "retry-missing-history"]:
+        client.delete(f"qtask:task:{task_id}")
     for key in client.scan_iter("qtask_dash_test:*"):
         client.delete(key)
 
@@ -105,6 +107,27 @@ def test_dashboard_bulk_retry_and_requeue_dlq(client, r):
     assert r.llen(queue) == 2
     assert r.llen(f"{queue}:retry") == 0
     assert r.llen(f"{queue}:dlq") == 0
+
+
+def test_dashboard_bulk_retry_updates_existing_history_without_orphans(client, r):
+    queue = "qtask_dash_test:sector-sina:store"
+    r.hset(
+        "qtask:task:retry-with-history",
+        mapping={"task_id": "retry-with-history", "status": "retry"},
+    )
+    r.expire("qtask:task:retry-with-history", 60)
+    r.zadd(f"qtask:hist:{queue}", {"retry-with-history": 1})
+    r.lpush(f"{queue}:retry", make_msg("retry-with-history"))
+    r.lpush(f"{queue}:retry", make_msg("retry-missing-history"))
+
+    response = client.post(f"/api/queue/{queue}/retry")
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == 2
+    assert r.hget("qtask:task:retry-with-history", "status") == "pending"
+    assert r.ttl("qtask:task:retry-with-history") > 60
+    assert r.zscore(f"qtask:hist:{queue}", "retry-with-history") is not None
+    assert r.exists("qtask:task:retry-missing-history") == 0
 
 
 def test_dashboard_recover_skips_active_worker(client, r):

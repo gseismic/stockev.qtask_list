@@ -175,7 +175,7 @@ class SmartQueue:
         return data
 
     def _move_poison_to_dlq(self, raw_msg: str, reason: str):
-        """Move an unreadable processing message to DLQ so it cannot block recovery."""
+        """将无法解码的 processing 消息移入 DLQ，防止阻塞 recovery。"""
         removed = self._move_from_processing(self.dlq, raw_msg, raw_msg, push_side="left")
         if not removed:
             return
@@ -183,15 +183,18 @@ class SmartQueue:
         try:
             data = json.loads(raw_msg)
         except (json.JSONDecodeError, TypeError):
-            logger.error(f"Moved malformed task message to DLQ: {reason}")
+            logger.error(f"无法解码的任务消息移入 DLQ: {reason}")
             return
         if not isinstance(data, dict):
-            logger.error(f"Moved non-object task message to DLQ: {reason}")
+            logger.error(f"非 object 任务消息移入 DLQ: {reason}")
             return
 
         task_id = data.get("task_id")
         if task_id:
+            logger.info(f"任务移入 DLQ: task_id={task_id} reason={reason}")
             self.history.update(task_id, {"status": "failed", "reason": reason})
+        else:
+            logger.warning(f"无 task_id 的任务消息移入 DLQ: {reason}")
 
     def _move_from_processing(
         self,
@@ -228,7 +231,13 @@ class SmartQueue:
             try:
                 data = self._decode_message(msg)
             except Exception as e:
-                logger.error(f"Pop decode failed: {e}")
+                task_id_hint = ""
+                try:
+                    raw_data = json.loads(msg)
+                    task_id_hint = f" task_id={raw_data.get('task_id', '?')}"
+                except Exception:
+                    pass
+                logger.error(f"Pop decode failed{task_id_hint}: {e}")
                 self._move_poison_to_dlq(msg, str(e))
                 return None, None
 
@@ -247,7 +256,13 @@ class SmartQueue:
             try:
                 data = self._decode_message(msg)
             except Exception as e:
-                logger.error(f"Pop no wait decode failed: {e}")
+                task_id_hint = ""
+                try:
+                    raw_data = json.loads(msg)
+                    task_id_hint = f" task_id={raw_data.get('task_id', '?')}"
+                except Exception:
+                    pass
+                logger.error(f"Pop no wait decode failed{task_id_hint}: {e}")
                 self._move_poison_to_dlq(msg, str(e))
                 return None, None
 
