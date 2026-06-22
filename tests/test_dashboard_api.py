@@ -267,3 +267,57 @@ def test_dashboard_delete_queue(client, r):
     assert r.exists(queue) == 0
     assert r.exists(f"{queue}:dlq") == 0
     assert r.exists("qtask:task:del-hist") == 0
+
+
+def test_dashboard_supplements_action_from_history_for_large_payload(client, r):
+    queue = "qtask_dash_test:large-payload:fetch"
+    large_payload = {"_large": True, "key": "abc123"}
+    msg = json.dumps({"task_id": "large-1", "payload": json.dumps(large_payload)})
+    r.lpush(queue, msg)
+    r.hset("qtask:task:large-1", mapping={
+        "task_id": "large-1", "status": "pending", "action": "scrape_day_kline",
+    })
+    r.zadd(f"qtask:hist:{queue}", {"large-1": 1})
+
+    response = client.get(f"/api/queue/{queue}/tasks", params={"state": "ready"})
+    assert response.status_code == 200
+    task = response.json()["tasks"][0]
+    assert task["task_id"] == "large-1"
+    assert task["action"] == "scrape_day_kline"
+
+
+def test_dashboard_resolves_compressed_payload(client, r):
+    import base64
+    import zstandard
+
+    queue = "qtask_dash_test:compressed:fetch"
+    original = {"action": "scrape_day_kline", "symbol": "sh600000"}
+    data = json.dumps(original).encode()
+    compressed = zstandard.ZstdCompressor().compress(data)
+    payload = {"_compressed": True, "data": base64.b64encode(compressed).decode()}
+    msg = json.dumps({"task_id": "comp-1", "payload": json.dumps(payload)})
+    r.lpush(queue, msg)
+
+    response = client.get(f"/api/task/comp-1/payload", params={"queue": queue, "state": "ready"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["action"] == "scrape_day_kline"
+    assert result["payload"]["symbol"] == "sh600000"
+
+
+def test_dashboard_payload_endpoint_for_large_without_storage(client, r):
+    queue = "qtask_dash_test:large-nostorage:fetch"
+    payload = {"_large": True, "key": "abc123"}
+    msg = json.dumps({"task_id": "large-ns-1", "payload": json.dumps(payload)})
+    r.lpush(queue, msg)
+    r.hset("qtask:task:large-ns-1", mapping={
+        "task_id": "large-ns-1", "status": "pending", "action": "scrape_fin_sheet",
+    })
+    r.zadd(f"qtask:hist:{queue}", {"large-ns-1": 1})
+
+    response = client.get(f"/api/task/large-ns-1/payload", params={"queue": queue, "state": "ready"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["action"] == "scrape_fin_sheet"
+    assert result["payload"]["_large"] is True
+    assert "未配置" in result["_note"]

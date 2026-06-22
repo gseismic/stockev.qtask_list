@@ -61,6 +61,10 @@ export const api = {
         }),
     deleteQueue: (queue) =>
         request(`/api/queue/${queuePath(queue)}`, { method: "DELETE" }),
+    taskPayload: (taskId, queue, state = "all") => {
+        const params = new URLSearchParams({ queue, state });
+        return request(`/api/task/${encodeURIComponent(taskId)}/payload?${params.toString()}`);
+    },
     requeueTask: (taskId, queue, fromState) =>
         request(`/api/task/${encodeURIComponent(taskId)}/requeue`, {
             method: "POST",

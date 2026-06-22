@@ -30,6 +30,7 @@ function App() {
     const [selectedQueue, setSelectedQueue] = useState("");
     const [queueQuery, setQueueQuery] = useState("");
     const [showCurrentOnly, setShowCurrentOnly] = useState(true);
+    const [namespaceFilter, setNamespaceFilter] = useState("");
     const [state, setState] = useState("all");
     const [taskSearch, setTaskSearch] = useState("");
     const [tasks, setTasks] = useState([]);
@@ -179,6 +180,11 @@ function App() {
             setSelectedTask(null);
         }
     };
+    const loadPayload = useCallback(async (task) => {
+        const queue = task._queue || effectiveQueue;
+        const state = taskState(task);
+        return api.taskPayload(task.task_id, queue, state);
+    }, [effectiveQueue]);
     const pushTask = (queue) => {
         try {
             const payload = JSON.parse(payloadText);
@@ -229,8 +235,10 @@ function App() {
                 selectedQueue: effectiveQueue,
                 query: queueQuery,
                 showCurrentOnly,
+                namespaceFilter,
                 onQuery: setQueueQuery,
                 onToggleCurrentOnly: toggleCurrentOnly,
+                onNamespaceFilter: setNamespaceFilter,
                 onSelect: setSelectedQueue,
                 onDelete: deleteQueue,
                 key: "queues",
@@ -310,6 +318,7 @@ function App() {
             onClose: () => setSelectedTask(null),
             onRequeue: requeueTask,
             onDelete: deleteTask,
+            onLoadPayload: loadPayload,
             key: "drawer",
         }),
         toast ? h("div", { className: "toast", key: "toast" }, toast) : null,

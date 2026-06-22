@@ -20,13 +20,16 @@ from dashboard.auth import (
 )
 from qtask_list.admin import QueueAdmin, QueueState
 from qtask_list.archiver import Monitor
+from qtask_list.storage import RemoteStorage
 
 
 app = FastAPI(title="qtask_list Dashboard")
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+STORAGE_URL = os.environ.get("QTASK_STORAGE_URL", "")
 redis_client: Any = redis.from_url(REDIS_URL, decode_responses=True)
-admin = QueueAdmin(redis_url=REDIS_URL, redis_client=redis_client)
+storage = RemoteStorage(STORAGE_URL) if STORAGE_URL else None
+admin = QueueAdmin(redis_url=REDIS_URL, redis_client=redis_client, storage=storage)
 monitor = Monitor(redis_client)
 
 BASE_DIR = os.path.dirname(__file__)
@@ -269,6 +272,16 @@ def api_task(task_id: str, _auth: None = Depends(require_auth)):
     if task:
         return task
     raise HTTPException(status_code=404, detail="Task not found")
+
+
+@app.get("/api/task/{task_id}/payload")
+def api_task_payload(
+    task_id: str,
+    queue: str = Query(..., description="Queue name"),
+    state: str = Query("all", description="Task state"),
+    _auth: None = Depends(require_auth),
+):
+    return admin.resolve_payload(task_id, queue, state)
 
 
 @app.post("/api/task/{task_id}/requeue")

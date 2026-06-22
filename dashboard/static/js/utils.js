@@ -134,9 +134,27 @@ export function shortId(taskId) {
 }
 
 export function summarize(value, maxLength = 140) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+        if (value._large) return `[大payload] key=${value.key || "?"}`;
+        if (value._compressed) return "[压缩payload]";
+    }
     const text = typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 0);
     if (text.length <= maxLength) return text;
     return `${text.slice(0, maxLength - 3)}...`;
+}
+
+export function extractNamespace(queueName) {
+    if (!queueName || !queueName.includes(":")) return "";
+    return queueName.split(":")[0];
+}
+
+export function extractNamespaces(queues) {
+    const ns = new Set();
+    for (const q of queues || []) {
+        const name = extractNamespace(q.name);
+        ns.add(name);
+    }
+    return [...ns].sort();
 }
 
 export function prettyJson(value) {

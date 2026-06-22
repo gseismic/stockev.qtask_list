@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import time
@@ -5,8 +6,10 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
 
 import redis
+import zstandard
 
 from .queue import SmartQueue
+from .storage import RemoteStorage
 
 
 class QueueState(str, Enum):
@@ -28,9 +31,12 @@ class QueueAdmin:
         self,
         redis_url: Optional[str] = None,
         redis_client: Optional[Any] = None,
+        storage: Optional[RemoteStorage] = None,
     ):
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self.r: Any = redis_client or redis.from_url(self.redis_url, decode_responses=True)
+        self.storage = storage
+        self._dctx = zstandard.ZstdDecompressor()
 
     # ==================== Queue Discovery ====================
 
@@ -181,6 +187,8 @@ class QueueAdmin:
                 break
             rows.extend(self._read_state(queue_name, item_state, remaining))
 
+        self._supplement_action_from_history(rows)
+
         if search:
             needle = search.lower()
             rows = [
@@ -206,6 +214,102 @@ class QueueAdmin:
         if isinstance(parsed, dict):
             return cast(Dict[str, Any], parsed)
         return {"task_id": task_id, "_raw": raw_value}
+
+    def resolve_payload(self, task_id: str, queue_name: str, state: str) -> Dict[str, Any]:
+        """从队列中查找任务消息并还原完整 payload（解压 / 拉取外存）。"""
+        selected_state = QueueState(state) if state in QueueState._value2member_map_ else QueueState.all
+
+        if selected_state == QueueState.history:
+            task = self.get_task(task_id)
+            if not task:
+                return {"task_id": task_id, "payload": None, "_note": "历史记录不含完整 payload"}
+            payload = task.get("payload")
+            note = "" if payload else "历史记录不含完整 payload，仅保留 action 和状态"
+            result = {"task_id": task_id, "payload": payload, "action": task.get("action", "")}
+            if note:
+                result["_note"] = note
+            return result
+
+        for item_state in ([selected_state] if selected_state != QueueState.all else [
+            QueueState.ready, QueueState.processing, QueueState.retry, QueueState.dlq, QueueState.delay,
+        ]):
+            raw_msg = self._find_raw_message(queue_name, task_id, item_state)
+            if raw_msg:
+                return self._resolve_payload_from_msg(raw_msg, task_id)
+
+        return {"task_id": task_id, "payload": None, "_note": "未在队列中找到此任务"}
+
+    def _supplement_action_from_history(self, rows: List[Dict[str, Any]]) -> None:
+        """对 action 为空且 task_id 非空的行，从 history hash 批量补充 action。"""
+        missing = [row for row in rows if not row.get("action") and row.get("task_id")]
+        if not missing:
+            return
+
+        pipe = self.r.pipeline()
+        for row in missing:
+            pipe.hget(f"qtask:task:{row['task_id']}", "action")
+        actions = pipe.execute()
+
+        for row, action in zip(missing, actions):
+            if action:
+                row["action"] = action
+
+    def _find_raw_message(self, queue_name: str, task_id: str, state: QueueState) -> Optional[str]:
+        for key in self._state_keys(queue_name, state):
+            if state == QueueState.delay:
+                for raw_msg, _score in self.r.zscan_iter(key):
+                    if self._message_task_id(raw_msg) == task_id:
+                        return raw_msg
+            else:
+                for raw_msg in self.r.lrange(key, 0, -1):
+                    if self._message_task_id(raw_msg) == task_id:
+                        return raw_msg
+        return None
+
+    def _resolve_payload_from_msg(self, raw_msg: str, task_id: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(raw_msg)
+        except (json.JSONDecodeError, TypeError):
+            return {"task_id": task_id, "payload": None, "_note": "消息解码失败"}
+
+        payload_raw = data.get("payload", {})
+        payload = self._parse_json(payload_raw) if isinstance(payload_raw, str) else payload_raw
+
+        if isinstance(payload, dict):
+            if payload.get("_compressed"):
+                try:
+                    compressed = base64.b64decode(payload["data"])
+                    raw = self._dctx.decompress(compressed)
+                    payload = json.loads(raw)
+                except Exception as e:
+                    return {"task_id": task_id, "payload": payload, "_note": f"解压失败: {e}"}
+
+            elif payload.get("_large"):
+                if self.storage:
+                    try:
+                        raw = self.storage.load(payload["key"])
+                        payload = json.loads(raw)
+                    except Exception as e:
+                        return {"task_id": task_id, "payload": payload, "_note": f"外存拉取失败: {e}"}
+                else:
+                    action = ""
+                    hist = self.get_task(task_id)
+                    if hist:
+                        action = hist.get("action", "")
+                    return {
+                        "task_id": task_id,
+                        "payload": payload,
+                        "action": action,
+                        "_note": "未配置 RemoteStorage，无法还原大 payload",
+                    }
+
+        action = payload.get("action", "") if isinstance(payload, dict) else ""
+        if not action:
+            hist = self.get_task(task_id)
+            if hist:
+                action = hist.get("action", "")
+
+        return {"task_id": task_id, "payload": payload, "action": action}
 
     def diagnose(self, queue_name: str) -> Dict[str, Any]:
         stats = self.queue_stats(queue_name)

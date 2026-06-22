@@ -342,6 +342,58 @@ button {
     font-weight: 650;
 }
 
+.outcome-fail.has-fail {
+    color: var(--red);
+}
+
+.namespace-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.ns-chip {
+    border: 1px solid var(--line);
+    background: #ffffff;
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 3px 10px;
+    cursor: pointer;
+}
+
+.ns-chip:hover {
+    border-color: var(--accent);
+}
+
+.ns-chip.active {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.payload-loading {
+    background: #101828;
+    color: #98a2b3;
+    border-radius: 8px;
+    padding: 24px;
+    text-align: center;
+    font-size: 13px;
+    animation: pulse 1s ease-in-out infinite;
+}
+
+.payload-note {
+    color: var(--yellow);
+    font-size: 12px;
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: #fffbeb;
+    border: 1px solid #f6d48b;
+    border-radius: 6px;
+}
+
 .panel {
     background: var(--panel);
     border: 1px solid var(--line);

@@ -1,6 +1,8 @@
 import {
     canRequeue,
     compareQueues,
+    extractNamespace,
+    extractNamespaces,
     formatTime,
     liveCount,
     primaryQueueIssue,
@@ -49,11 +51,15 @@ export function SystemBanner({ health }) {
     ]);
 }
 
-export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQuery, onToggleCurrentOnly, onSelect, onDelete }) {
+export function QueueList({ queues, selectedQueue, query, showCurrentOnly, namespaceFilter, onQuery, onToggleCurrentOnly, onNamespaceFilter, onSelect, onDelete }) {
     const sorted = [...queues].sort(compareQueues);
     const activeQueues = sorted.filter((queue) => queueActivityCount(queue) > 0);
     const source = showCurrentOnly && activeQueues.length ? activeQueues : sorted;
-    const filtered = source.filter((queue) => queue.name.toLowerCase().includes(query.toLowerCase()));
+    const byNamespace = namespaceFilter
+        ? source.filter((queue) => extractNamespace(queue.name) === namespaceFilter)
+        : source;
+    const filtered = byNamespace.filter((queue) => queue.name.toLowerCase().includes(query.toLowerCase()));
+    const namespaces = extractNamespaces(source);
 
     return h("aside", { className: "sidebar" }, [
         h("div", { className: "section-title", key: "title" }, "队列"),
@@ -72,6 +78,18 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQue
             }, "只看当前"),
             h("span", { className: "muted small", key: "count" }, `${activeQueues.length}/${queues.length}`),
         ]),
+        namespaces.length > 1 ? h("div", { className: "namespace-filter", key: "ns" }, [
+            h("button", {
+                className: `ns-chip ${!namespaceFilter ? "active" : ""}`,
+                onClick: () => onNamespaceFilter(""),
+                key: "ns-all",
+            }, "全部"),
+            ...namespaces.map((ns) => h("button", {
+                className: `ns-chip ${namespaceFilter === ns ? "active" : ""}`,
+                onClick: () => onNamespaceFilter(ns),
+                key: `ns-${ns}`,
+            }, ns || "无命名空间")),
+        ]) : null,
         h("div", { className: "queue-list", key: "list" },
             filtered.length ? filtered.map((queue) => {
                 const hasDanger = Number(queue.dlq || 0) > 0 || Number(queue.stale_workers || 0) > 0;
@@ -100,10 +118,10 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQue
                         h("div", { className: "mini-stat", key: "dlq" }, [h("strong", {}, queue.dlq), h("span", {}, "死信")]),
                         h("div", { className: "mini-stat", key: "delay" }, [h("strong", {}, queue.delay), h("span", {}, "延迟")]),
                     ]),
-                    (completed > 0 || failed > 0) ? h("div", { className: "queue-outcome", key: "outcome" }, [
+                    h("div", { className: "queue-outcome", key: "outcome" }, [
                         h("span", { className: "outcome-ok", key: "ok" }, `✓ ${completed}`),
-                        h("span", { className: "outcome-fail", key: "fail" }, `✗ ${failed}`),
-                    ]) : null,
+                        h("span", { className: `outcome-fail ${failed > 0 ? "has-fail" : ""}`, key: "fail" }, `✗ ${failed}`),
+                    ]),
                 ]);
             }) : h("div", { className: "empty compact" }, "没有队列")
         ),
@@ -399,7 +417,30 @@ export function DiagnosePanel({ diagnose, workers }) {
     ]);
 }
 
-export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDelete }) {
+export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDelete, onLoadPayload }) {
+    const [resolvedPayload, setResolvedPayload] = React.useState(null);
+    const [payloadLoading, setPayloadLoading] = React.useState(false);
+    const [payloadNote, setPayloadNote] = React.useState("");
+
+    React.useEffect(() => {
+        setResolvedPayload(null);
+        setPayloadNote("");
+        if (!task || !onLoadPayload) return;
+        const payload = task.payload;
+        const isRef = payload && typeof payload === "object" && (payload._large || payload._compressed);
+        if (!isRef) return;
+
+        setPayloadLoading(true);
+        onLoadPayload(task).then((result) => {
+            if (result.payload !== undefined && result.payload !== null) {
+                setResolvedPayload(result.payload);
+            }
+            if (result._note) setPayloadNote(result._note);
+        }).catch((e) => {
+            setPayloadNote(e.message || "加载失败");
+        }).finally(() => setPayloadLoading(false));
+    }, [task, onLoadPayload]);
+
     if (!task) return null;
     const state = taskState(task);
     const isBusy = !!loading;
@@ -414,6 +455,9 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
             metaData[key] = value;
         }
     }
+
+    const displayPayload = resolvedPayload !== null ? resolvedPayload : task.payload;
+    const isRefPayload = task.payload && typeof task.payload === "object" && (task.payload._large || task.payload._compressed);
 
     return h(React.Fragment, {}, [
         h("div", { className: "drawer-backdrop", onClick: onClose, key: "backdrop" }),
@@ -441,7 +485,10 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
                     }, "删除") : null,
                 ]),
                 h("div", { className: "section-title", key: "payload-title" }, "Payload"),
-                h("pre", { className: "json-block", key: "payload" }, prettyJson(task.payload ?? {})),
+                isRefPayload && payloadLoading
+                    ? h("div", { className: "payload-loading", key: "payload-loading" }, "正在还原 payload…")
+                    : h("pre", { className: "json-block", key: "payload" }, prettyJson(displayPayload ?? {})),
+                payloadNote ? h("div", { className: "payload-note", key: "note" }, payloadNote) : null,
                 h("div", { className: "section-title", key: "detail-title" }, "任务详情"),
                 h("pre", { className: "json-block", key: "detail" }, prettyJson(userData)),
                 Object.keys(metaData).length ? h("details", { className: "meta-details", key: "meta" }, [
