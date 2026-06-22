@@ -59,6 +59,8 @@ export const api = {
             method: "POST",
             body: JSON.stringify({ include_dlq: includeDlq, include_history: includeHistory }),
         }),
+    deleteQueue: (queue) =>
+        request(`/api/queue/${queuePath(queue)}`, { method: "DELETE" }),
     requeueTask: (taskId, queue, fromState) =>
         request(`/api/task/${encodeURIComponent(taskId)}/requeue`, {
             method: "POST",

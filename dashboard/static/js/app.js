@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import {
     DangerActions,
     DiagnosePanel,
+    GlobalOverview,
     PushTaskForm,
     QueueActions,
     QueueIssueBanner,
@@ -158,6 +159,11 @@ function App() {
             runAction(() => api.clearQueue(queue, true, false), "队列已清空", "clear");
         }
     };
+    const deleteQueue = (queue) => {
+        if (confirmDanger(`确认删除队列 ${queue}？此操作将删除所有任务数据及历史记录，不可撤销。`)) {
+            runAction(() => api.deleteQueue(queue), "队列已删除", "deleteQueue");
+        }
+    };
     const requeueTask = (task) => {
         const fromState = taskState(task);
         const queue = task._queue || effectiveQueue;
@@ -200,6 +206,8 @@ function App() {
         dlq: 0,
         delay: 0,
         history: 0,
+        completed: 0,
+        failed: 0,
         active_workers: 0,
     };
 
@@ -224,10 +232,12 @@ function App() {
                 onQuery: setQueueQuery,
                 onToggleCurrentOnly: toggleCurrentOnly,
                 onSelect: setSelectedQueue,
+                onDelete: deleteQueue,
                 key: "queues",
             }),
             h("main", { className: "main", key: "main" }, effectiveQueue ? [
                 h("div", { className: "context-label", key: "context" }, "当前队列状态"),
+                h(GlobalOverview, { queues, key: "overview" }),
                 h(StatsGrid, { stats, key: "stats" }),
                 h(QueueIssueBanner, { stats, key: "issue" }),
                 h("div", { className: "split", key: "split" }, [

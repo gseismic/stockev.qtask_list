@@ -60,15 +60,50 @@ class QueueAdmin:
 
     def queue_stats(self, queue_name: str) -> Dict[str, int]:
         workers = self.list_workers(queue_name)
+        history_counts = self._history_stats(queue_name)
         return {
             "queue": int(self.r.llen(queue_name)),
             "processing": sum(int(self.r.llen(key)) for key in self.processing_keys(queue_name)),
             "retry": int(self.r.llen(f"{queue_name}:retry")),
             "dlq": int(self.r.llen(f"{queue_name}:dlq")),
             "delay": int(self.r.zcard(f"{queue_name}:delay")),
-            "history": int(self.r.zcard(f"qtask:hist:{queue_name}")),
+            "history": history_counts["total"],
+            "completed": history_counts["completed"],
+            "failed": history_counts["failed"],
             "active_workers": sum(1 for worker in workers if worker["active"]),
             "stale_workers": sum(1 for worker in workers if not worker["active"]),
+        }
+
+    def _history_stats(self, queue_name: str, sample_limit: int = 2000) -> Dict[str, int]:
+        """统计历史任务完成/失败数量。
+
+        在 sample_limit 条内精确计数；超出时按比例外推（近似值）。
+        """
+        hist_key = f"qtask:hist:{queue_name}"
+        total = int(self.r.zcard(hist_key) or 0)
+        if total == 0:
+            return {"total": 0, "completed": 0, "failed": 0}
+
+        task_ids = self.r.zrevrange(hist_key, 0, sample_limit - 1)
+        if not task_ids:
+            return {"total": total, "completed": 0, "failed": 0}
+
+        pipe = self.r.pipeline()
+        for task_id in task_ids:
+            pipe.hget(f"qtask:task:{task_id}", "status")
+        statuses = pipe.execute()
+
+        sampled_completed = sum(1 for s in statuses if s == "completed")
+        sampled_failed = sum(1 for s in statuses if s == "failed")
+
+        if total <= sample_limit:
+            return {"total": total, "completed": sampled_completed, "failed": sampled_failed}
+
+        ratio = total / len(task_ids)
+        return {
+            "total": total,
+            "completed": int(sampled_completed * ratio),
+            "failed": int(sampled_failed * ratio),
         }
 
     def processing_keys(self, queue_name: str, include_legacy: bool = True) -> List[str]:
@@ -332,6 +367,38 @@ class QueueAdmin:
                 pipe.execute()
             else:
                 self.r.delete(hist_key)
+
+        return {"deleted_keys": deleted_keys, "history_records": history_records}
+
+    def delete_queue(self, queue_name: str) -> Dict[str, int]:
+        """彻底删除队列及其所有关联数据（含历史记录），不可撤销。"""
+        deleted_keys = 0
+        keys_to_delete = [
+            queue_name,
+            f"{queue_name}:retry",
+            f"{queue_name}:dlq",
+            f"{queue_name}:delay",
+        ]
+        keys_to_delete.extend(self.processing_keys(queue_name))
+        for key in self.r.scan_iter(f"{queue_name}:worker:*"):
+            keys_to_delete.append(key)
+
+        if keys_to_delete:
+            deleted_keys += int(self.r.delete(*keys_to_delete) or 0)
+
+        hist_key = f"qtask:hist:{queue_name}"
+        history_records = 0
+        task_ids = self.r.zrange(hist_key, 0, -1)
+        if task_ids:
+            pipe = self.r.pipeline()
+            for task_id in task_ids:
+                pipe.delete(f"qtask:task:{task_id}")
+            pipe.delete(hist_key)
+            results = pipe.execute()
+            history_records = len(task_ids)
+            deleted_keys += sum(1 for r in results if r)
+        else:
+            deleted_keys += int(self.r.delete(hist_key) or 0)
 
         return {"deleted_keys": deleted_keys, "history_records": history_records}
 

@@ -217,3 +217,53 @@ def test_dashboard_auth_requires_login(monkeypatch):
 
     queues = client.get("/api/queues")
     assert queues.status_code == 401
+
+
+def test_dashboard_queue_stats_includes_completed_failed(client, r):
+    queue = "qtask_dash_test:perf-sina:fetch"
+    r.lpush(queue, make_msg("perf-1", {"action": "scrape_perf"}))
+
+    r.hset("qtask:task:hist-ok", mapping={
+        "task_id": "hist-ok", "status": "completed", "action": "scrape_perf",
+    })
+    r.hset("qtask:task:hist-fail", mapping={
+        "task_id": "hist-fail", "status": "failed", "action": "scrape_perf",
+    })
+    r.hset("qtask:task:hist-pending", mapping={
+        "task_id": "hist-pending", "status": "pending", "action": "scrape_perf",
+    })
+    r.zadd(f"qtask:hist:{queue}", {"hist-ok": 1, "hist-fail": 2, "hist-pending": 3})
+
+    response = client.get(f"/api/queue/{queue}")
+    assert response.status_code == 200
+    stats = response.json()["stats"]
+    assert stats["history"] == 3
+    assert stats["completed"] == 1
+    assert stats["failed"] == 1
+    # pending should not be counted as completed or failed
+    assert stats["completed"] + stats["failed"] <= stats["history"]
+
+
+def test_dashboard_delete_queue(client, r):
+    queue = "qtask_dash_test:delete-me:fetch"
+    r.lpush(queue, make_msg("del-1"))
+    r.lpush(f"{queue}:dlq", make_msg("del-dlq"))
+    r.hset("qtask:task:del-hist", mapping={
+        "task_id": "del-hist", "status": "completed",
+    })
+    r.zadd(f"qtask:hist:{queue}", {"del-hist": 1})
+
+    queues_before = client.get("/api/queues").json()
+    assert any(q["name"] == queue for q in queues_before)
+
+    response = client.delete(f"/api/queue/{queue}")
+    assert response.status_code == 200
+    result = response.json()
+    assert result["history_records"] == 1
+    assert result["deleted_keys"] > 0
+
+    queues_after = client.get("/api/queues").json()
+    assert not any(q["name"] == queue for q in queues_after)
+    assert r.exists(queue) == 0
+    assert r.exists(f"{queue}:dlq") == 0
+    assert r.exists("qtask:task:del-hist") == 0

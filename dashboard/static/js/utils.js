@@ -39,6 +39,7 @@ export function queuePriority(queue = {}) {
     const retry = Number(queue.retry || 0);
     const dlq = Number(queue.dlq || 0);
     const delay = Number(queue.delay || 0);
+    const failed = Number(queue.failed || 0);
     const activeWorkers = Number(queue.active_workers || 0);
     const staleWorkers = Number(queue.stale_workers || 0);
     const history = Number(queue.history || 0);
@@ -46,6 +47,7 @@ export function queuePriority(queue = {}) {
     return (dlq > 0 ? 1_000_000 : 0) + Math.min(dlq, 9999)
         + (retry > 0 ? 900_000 : 0) + Math.min(retry, 9999)
         + (staleWorkers > 0 ? 800_000 : 0) + Math.min(staleWorkers, 9999)
+        + (failed > 0 ? 750_000 : 0) + Math.min(failed, 9999)
         + (processing > 0 ? 700_000 : 0) + Math.min(processing, 9999)
         + (ready > 0 ? 500_000 : 0) + Math.min(ready, 9999)
         + (delay > 0 ? 300_000 : 0) + Math.min(delay, 9999)

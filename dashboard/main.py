@@ -292,6 +292,14 @@ def api_task_delete(
     return admin.delete_task(task_id, queue_name=queue)
 
 
+@app.delete("/api/queue/{name}")
+def api_delete_queue(
+    name: str,
+    _auth: None = Depends(require_auth),
+):
+    return admin.delete_queue(name)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     settings = get_auth_settings()

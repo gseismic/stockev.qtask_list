@@ -49,7 +49,7 @@ export function SystemBanner({ health }) {
     ]);
 }
 
-export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQuery, onToggleCurrentOnly, onSelect }) {
+export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQuery, onToggleCurrentOnly, onSelect, onDelete }) {
     const sorted = [...queues].sort(compareQueues);
     const activeQueues = sorted.filter((queue) => queueActivityCount(queue) > 0);
     const source = showCurrentOnly && activeQueues.length ? activeQueues : sorted;
@@ -76,12 +76,23 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQue
             filtered.length ? filtered.map((queue) => {
                 const hasDanger = Number(queue.dlq || 0) > 0 || Number(queue.stale_workers || 0) > 0;
                 const hasWork = liveCount(queue) > 0;
+                const completed = Number(queue.completed || 0);
+                const failed = Number(queue.failed || 0);
+                const isEmpty = liveCount(queue) === 0 && Number(queue.history || 0) === 0 && Number(queue.active_workers || 0) === 0;
                 return h("button", {
                     className: `queue-item ${queue.name === selectedQueue ? "active" : ""} ${hasDanger ? "has-danger" : ""} ${hasWork ? "has-work" : ""}`,
                     onClick: () => onSelect(queue.name),
                     key: queue.name,
                 }, [
-                    h("div", { className: "queue-name", key: "name" }, queue.name),
+                    h("div", { className: "queue-name-row", key: "namerow" }, [
+                        h("div", { className: "queue-name", key: "name" }, queue.name),
+                        isEmpty ? h("span", {
+                            className: "queue-delete-btn",
+                            title: "删除此队列",
+                            onClick: (event) => { event.stopPropagation(); onDelete(queue.name); },
+                            key: "del",
+                        }, "×") : null,
+                    ]),
                     h("div", { className: "queue-counts", key: "counts" }, [
                         h("div", { className: "mini-stat", key: "ready" }, [h("strong", {}, queue.queue), h("span", {}, "待")]),
                         h("div", { className: "mini-stat", key: "proc" }, [h("strong", {}, queue.processing), h("span", {}, "中")]),
@@ -89,9 +100,51 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, onQue
                         h("div", { className: "mini-stat", key: "dlq" }, [h("strong", {}, queue.dlq), h("span", {}, "死信")]),
                         h("div", { className: "mini-stat", key: "delay" }, [h("strong", {}, queue.delay), h("span", {}, "延迟")]),
                     ]),
+                    (completed > 0 || failed > 0) ? h("div", { className: "queue-outcome", key: "outcome" }, [
+                        h("span", { className: "outcome-ok", key: "ok" }, `✓ ${completed}`),
+                        h("span", { className: "outcome-fail", key: "fail" }, `✗ ${failed}`),
+                    ]) : null,
                 ]);
             }) : h("div", { className: "empty compact" }, "没有队列")
         ),
+    ]);
+}
+
+export function GlobalOverview({ queues }) {
+    if (!queues || queues.length === 0) return null;
+    const totals = queues.reduce((acc, q) => ({
+        queue: acc.queue + Number(q.queue || 0),
+        processing: acc.processing + Number(q.processing || 0),
+        retry: acc.retry + Number(q.retry || 0),
+        dlq: acc.dlq + Number(q.dlq || 0),
+        delay: acc.delay + Number(q.delay || 0),
+        completed: acc.completed + Number(q.completed || 0),
+        failed: acc.failed + Number(q.failed || 0),
+    }), { queue: 0, processing: 0, retry: 0, dlq: 0, delay: 0, completed: 0, failed: 0 });
+
+    const items = [
+        { label: "待处理", value: totals.queue, tone: totals.queue > 0 ? "warn" : "" },
+        { label: "处理中", value: totals.processing },
+        { label: "已完成", value: totals.completed, tone: totals.completed > 0 ? "ok" : "" },
+        { label: "已失败", value: totals.failed, tone: totals.failed > 0 ? "fail" : "" },
+        { label: "重试", value: totals.retry },
+        { label: "死信", value: totals.dlq, tone: totals.dlq > 0 ? "fail" : "" },
+    ].filter(item => item.value > 0 || item.tone);
+
+    const totalLive = totals.queue + totals.processing + totals.retry + totals.dlq + totals.delay;
+    const totalDone = totals.completed + totals.failed;
+
+    return h("div", { className: "global-overview" }, [
+        h("span", { className: "overview-title", key: "title" }, "跨队列总览"),
+        h("div", { className: "overview-items", key: "items" },
+            items.map((item) => h("span", { className: `overview-item ${item.tone}`, key: item.label }, [
+                h("span", { className: "overview-label", key: "label" }, item.label),
+                h("strong", { key: "value" }, item.value),
+            ]))
+        ),
+        totalLive > 0 || totalDone > 0 ? h("span", { className: "overview-summary", key: "summary" },
+            `进行中 ${totalLive} / 已完成 ${totalDone}`
+        ) : null,
     ]);
 }
 
@@ -99,6 +152,8 @@ export function StatsGrid({ stats }) {
     const items = [
         { label: "待处理", value: stats.queue, tone: Number(stats.queue || 0) > 0 && Number(stats.active_workers || 0) === 0 ? "warning" : "" },
         { label: "处理中", value: stats.processing },
+        { label: "已完成", value: stats.completed, tone: Number(stats.completed || 0) > 0 ? "ok" : "" },
+        { label: "已失败", value: stats.failed, tone: Number(stats.failed || 0) > 0 ? "danger" : "" },
         { label: "待重试", value: stats.retry, tone: Number(stats.retry || 0) > 0 ? "warning" : "" },
         { label: "死信", value: stats.dlq, tone: Number(stats.dlq || 0) > 0 ? "danger" : "" },
         { label: "延迟", value: stats.delay },
@@ -110,7 +165,7 @@ export function StatsGrid({ stats }) {
                 : (Number(stats.active_workers || 0) > 0 ? "活跃" : "无"),
             tone: Number(stats.stale_workers || 0) > 0 ? "danger" : "",
         },
-        { label: "历史", value: stats.history, tone: "muted" },
+        { label: "历史", value: stats.history, hint: "含已完成与已失败", tone: "muted" },
     ];
     return h("div", { className: "stats" },
         items.map((item) => h("div", { className: `stat ${item.tone || ""}`, key: item.label }, [
@@ -348,6 +403,18 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
     if (!task) return null;
     const state = taskState(task);
     const isBusy = !!loading;
+
+    const userFields = ["task_id", "action", "status", "payload", "created_at", "updated_at", "run_at"];
+    const userData = {};
+    const metaData = {};
+    for (const [key, value] of Object.entries(task)) {
+        if (userFields.includes(key)) {
+            userData[key] = value;
+        } else {
+            metaData[key] = value;
+        }
+    }
+
     return h(React.Fragment, {}, [
         h("div", { className: "drawer-backdrop", onClick: onClose, key: "backdrop" }),
         h("aside", { className: "drawer", key: "drawer" }, [
@@ -375,8 +442,12 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
                 ]),
                 h("div", { className: "section-title", key: "payload-title" }, "Payload"),
                 h("pre", { className: "json-block", key: "payload" }, prettyJson(task.payload ?? {})),
-                h("div", { className: "section-title", key: "raw-title" }, "Raw"),
-                h("pre", { className: "json-block", key: "raw" }, prettyJson(task)),
+                h("div", { className: "section-title", key: "detail-title" }, "任务详情"),
+                h("pre", { className: "json-block", key: "detail" }, prettyJson(userData)),
+                Object.keys(metaData).length ? h("details", { className: "meta-details", key: "meta" }, [
+                    h("summary", { className: "meta-summary", key: "summary" }, "内部元数据"),
+                    h("pre", { className: "json-block meta-block", key: "block" }, prettyJson(metaData)),
+                ]) : null,
             ]),
         ]),
     ]);
