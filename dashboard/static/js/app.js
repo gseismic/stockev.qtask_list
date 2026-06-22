@@ -30,7 +30,7 @@ function App() {
     const [selectedQueue, setSelectedQueue] = useState("");
     const [queueQuery, setQueueQuery] = useState("");
     const [showCurrentOnly, setShowCurrentOnly] = useState(true);
-    const [namespaceFilter, setNamespaceFilter] = useState("");
+    const [namespaceFilter, setNamespaceFilter] = useState(null);
     const [state, setState] = useState("all");
     const [taskSearch, setTaskSearch] = useState("");
     const [tasks, setTasks] = useState([]);
@@ -41,8 +41,10 @@ function App() {
     const [lastUpdate, setLastUpdate] = useState("");
     const [toast, setToast] = useState("");
     const [loadingAction, setLoadingAction] = useState(null);
+    const [isLoading, setIsLoading] = useState(true);
     const [payloadText, setPayloadText] = useState('{\n  "action": "example"\n}');
     const [delaySeconds, setDelaySeconds] = useState(0);
+    const [expireSeconds, setExpireSeconds] = useState(0);
 
     const rankedQueues = useMemo(() => [...queues].sort(compareQueues), [queues]);
 
@@ -107,9 +109,11 @@ function App() {
             await loadQueues();
             await loadQueueDetail();
             setLastUpdate(new Date().toLocaleTimeString());
+            setIsLoading(false);
         } catch (error) {
             setHealth({ status: "error", error: error.message });
             notify(error.message);
+            setIsLoading(false);
         }
     }, [loadQueueDetail, loadQueues, notify]);
 
@@ -145,6 +149,7 @@ function App() {
 
     const retryQueue = (queue) => runAction(() => api.retryQueue(queue), "retry 已移回 ready", "retry");
     const requeueDlq = (queue) => runAction(() => api.requeueDlq(queue), "DLQ 已重放", "requeueDlq");
+    const requeueExpired = (queue) => runAction(() => api.requeueExpired(queue), "过期任务已放回", "requeueExpired");
     const recoverQueue = (queue, includeActive) => runAction(
         () => api.recoverQueue(queue, includeActive),
         includeActive ? "已强制恢复 processing" : "已恢复 stale processing",
@@ -188,7 +193,7 @@ function App() {
     const pushTask = (queue) => {
         try {
             const payload = JSON.parse(payloadText);
-            runAction(() => api.pushTask(queue, payload, delaySeconds), "任务已投递", "push");
+            runAction(() => api.pushTask(queue, payload, delaySeconds, expireSeconds), "任务已投递", "push");
         } catch (error) {
             notify(`Payload JSON 无效：${error.message}`);
         }
@@ -214,6 +219,7 @@ function App() {
         history: 0,
         completed: 0,
         failed: 0,
+        expired: 0,
         active_workers: 0,
     };
 
@@ -228,7 +234,7 @@ function App() {
             onLogout: logout,
             key: "topbar",
         }),
-        h(SystemBanner, { health, key: "system" }),
+        h(SystemBanner, { health, isLoading, key: "system" }),
         h("div", { className: "layout", key: "layout" }, [
             h(QueueList, {
                 queues,
@@ -263,6 +269,7 @@ function App() {
                                 onRetry: retryQueue,
                                 onRequeueDlq: requeueDlq,
                                 onRecover: recoverQueue,
+                                onRequeueExpired: requeueExpired,
                                 key: "actions",
                             }),
                         ]),
@@ -302,8 +309,10 @@ function App() {
                             loading: loadingAction,
                             payloadText,
                             delaySeconds,
+                            expireSeconds,
                             onPayload: setPayloadText,
                             onDelay: setDelaySeconds,
+                            onExpire: setExpireSeconds,
                             onPush: pushTask,
                             key: "push",
                         }),

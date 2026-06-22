@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, cast
 
+import orjson
 import redis
 import zstandard
 from loguru import logger
@@ -67,7 +68,12 @@ class SmartQueue:
 
     # ==================== Push ====================
 
-    def push(self, payload: Dict[str, Any], delay_seconds: int = 0) -> str:
+    def push(
+        self,
+        payload: Dict[str, Any],
+        delay_seconds: int = 0,
+        expire_seconds: int = 0,
+    ) -> str:
         """
         推送任务到队列。超过 compress_threshold 的 payload 自动 zstd 压缩，
         优先使用 RemoteStorage（若配置），否则退化为压缩存储。
@@ -76,8 +82,7 @@ class SmartQueue:
             task_id = str(uuid.uuid4())
 
             original_action = payload.get("action")
-            payload_json = json.dumps(payload)
-            data = payload_json.encode("utf-8")
+            data = orjson.dumps(payload)
 
             if self.storage and len(data) > self.large_threshold:
                 key = self.storage.save_bytes(data)
@@ -86,11 +91,14 @@ class SmartQueue:
                 compressed = self._cctx.compress(data)
                 payload = {"_compressed": True, "data": base64.b64encode(compressed).decode("ascii")}
 
-            payload_json = json.dumps(payload)
+            payload_json = orjson.dumps(payload).decode()
+            msg = orjson.dumps({"task_id": task_id, "payload": payload_json}).decode()
 
-            msg = json.dumps({"task_id": task_id, "payload": payload_json})
+            history_data: Dict[str, Any] = {"action": original_action, "status": "pending"}
+            if expire_seconds > 0:
+                history_data["expires_at"] = time.time() + expire_seconds
 
-            self.history.record(task_id, {"action": original_action, "status": "pending"})
+            self.history.record(task_id, history_data)
 
             if delay_seconds > 0:
                 self._push_delay(msg, delay_seconds)
@@ -112,8 +120,7 @@ class SmartQueue:
             task_ids.append(task_id)
 
             original_action = payload.get("action")
-            payload_json = json.dumps(payload)
-            data = payload_json.encode("utf-8")
+            data = orjson.dumps(payload)
 
             if self.storage and len(data) > self.large_threshold:
                 key = self.storage.save_bytes(data)
@@ -122,9 +129,8 @@ class SmartQueue:
                 compressed = self._cctx.compress(data)
                 payload = {"_compressed": True, "data": base64.b64encode(compressed).decode("ascii")}
 
-            payload_json = json.dumps(payload)
-
-            msg = json.dumps({"task_id": task_id, "payload": payload_json})
+            payload_json = orjson.dumps(payload).decode()
+            msg = orjson.dumps({"task_id": task_id, "payload": payload_json}).decode()
 
             pipe.lpush(self.queue, msg)
 
@@ -136,7 +142,7 @@ class SmartQueue:
                 "created_at": time.time(),
             }
             hist_mapping = {
-                k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in hist_data.items()
+                k: orjson.dumps(v).decode() if isinstance(v, (dict, list)) else v for k, v in hist_data.items()
             }
             pipe.hset(task_key, mapping=hist_mapping)
             pipe.expire(task_key, self.history.ttl_seconds)
@@ -312,7 +318,7 @@ class SmartQueue:
 
         retry = payload.get("_retry", 0) + 1
         payload["_retry"] = retry
-        new_msg = json.dumps({"task_id": task_id, "payload": json.dumps(payload)})
+        new_msg = orjson.dumps({"task_id": task_id, "payload": orjson.dumps(payload).decode()}).decode()
 
         if retry >= self.max_retry:
             moved = self._move_from_processing(self.dlq, raw_msg, new_msg, push_side="left")

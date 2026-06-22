@@ -43,7 +43,13 @@ export function TopBar({ health, auth, autoRefresh, lastUpdate, onRefresh, onTog
     ]);
 }
 
-export function SystemBanner({ health }) {
+export function SystemBanner({ health, isLoading }) {
+    if (isLoading) {
+        return h("div", { className: "system-banner loading" }, [
+            h("strong", { key: "title" }, "正在加载…"),
+            h("span", { key: "detail" }, "正在获取队列和任务数据，请稍候。"),
+        ]);
+    }
     if (health?.status !== "error") return null;
     return h("div", { className: "system-banner danger" }, [
         h("strong", { key: "title" }, "连接异常，当前数据可能已过期"),
@@ -55,9 +61,9 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, names
     const sorted = [...queues].sort(compareQueues);
     const activeQueues = sorted.filter((queue) => queueActivityCount(queue) > 0);
     const source = showCurrentOnly && activeQueues.length ? activeQueues : sorted;
-    const byNamespace = namespaceFilter
-        ? source.filter((queue) => extractNamespace(queue.name) === namespaceFilter)
-        : source;
+    const byNamespace = namespaceFilter === null
+        ? source
+        : source.filter((queue) => extractNamespace(queue.name) === namespaceFilter);
     const filtered = byNamespace.filter((queue) => queue.name.toLowerCase().includes(query.toLowerCase()));
     const namespaces = extractNamespaces(source);
 
@@ -75,13 +81,13 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, names
                 className: `chip ${showCurrentOnly ? "active" : ""}`,
                 onClick: onToggleCurrentOnly,
                 key: "toggle",
-            }, "只看当前"),
+            }, "有活动的队列"),
             h("span", { className: "muted small", key: "count" }, `${activeQueues.length}/${queues.length}`),
         ]),
         namespaces.length > 1 ? h("div", { className: "namespace-filter", key: "ns" }, [
             h("button", {
-                className: `ns-chip ${!namespaceFilter ? "active" : ""}`,
-                onClick: () => onNamespaceFilter(""),
+                className: `ns-chip ${namespaceFilter === null ? "active" : ""}`,
+                onClick: () => onNamespaceFilter(null),
                 key: "ns-all",
             }, "全部"),
             ...namespaces.map((ns) => h("button", {
@@ -138,13 +144,15 @@ export function GlobalOverview({ queues }) {
         delay: acc.delay + Number(q.delay || 0),
         completed: acc.completed + Number(q.completed || 0),
         failed: acc.failed + Number(q.failed || 0),
-    }), { queue: 0, processing: 0, retry: 0, dlq: 0, delay: 0, completed: 0, failed: 0 });
+        expired: acc.expired + Number(q.expired || 0),
+    }), { queue: 0, processing: 0, retry: 0, dlq: 0, delay: 0, completed: 0, failed: 0, expired: 0 });
 
     const items = [
         { label: "待处理", value: totals.queue, tone: totals.queue > 0 ? "warn" : "" },
         { label: "处理中", value: totals.processing },
         { label: "已完成", value: totals.completed, tone: totals.completed > 0 ? "ok" : "" },
         { label: "已失败", value: totals.failed, tone: totals.failed > 0 ? "fail" : "" },
+        { label: "已过期", value: totals.expired, tone: totals.expired > 0 ? "warn" : "" },
         { label: "重试", value: totals.retry },
         { label: "死信", value: totals.dlq, tone: totals.dlq > 0 ? "fail" : "" },
     ].filter(item => item.value > 0 || item.tone);
@@ -174,6 +182,7 @@ export function StatsGrid({ stats }) {
         { label: "已失败", value: stats.failed, tone: Number(stats.failed || 0) > 0 ? "danger" : "" },
         { label: "待重试", value: stats.retry, tone: Number(stats.retry || 0) > 0 ? "warning" : "" },
         { label: "死信", value: stats.dlq, tone: Number(stats.dlq || 0) > 0 ? "danger" : "" },
+        { label: "已过期", value: stats.expired, tone: Number(stats.expired || 0) > 0 ? "warning" : "" },
         { label: "延迟", value: stats.delay },
         {
             label: "Worker",
@@ -222,10 +231,11 @@ export function StateTabs({ selectedState, onState, stats }) {
     );
 }
 
-export function QueueActions({ queue, stats, readOnly, loading, onRetry, onRequeueDlq, onRecover }) {
+export function QueueActions({ queue, stats, readOnly, loading, onRetry, onRequeueDlq, onRecover, onRequeueExpired }) {
     const retryDisabled = Number(stats.retry || 0) === 0;
     const dlqDisabled = Number(stats.dlq || 0) === 0;
     const processingDisabled = Number(stats.processing || 0) === 0;
+    const expiredDisabled = Number(stats.expired || 0) === 0;
     const isBusy = !!loading;
 
     return h("div", { className: "button-row" }, [
@@ -250,6 +260,13 @@ export function QueueActions({ queue, stats, readOnly, loading, onRetry, onReque
             title: readOnly ? "连接异常时不能执行写操作" : (processingDisabled ? "没有处理中任务" : "恢复失联 Worker 的处理中任务"),
             key: "recover",
         }, loading === "recover" ? "处理中…" : "安全恢复"),
+        h("button", {
+            className: `btn${loading === "requeueExpired" ? " loading" : ""}`,
+            disabled: readOnly || expiredDisabled || isBusy,
+            onClick: () => onRequeueExpired(queue),
+            title: readOnly ? "连接异常时不能执行写操作" : (expiredDisabled ? "没有过期任务" : "将过期任务放回待处理"),
+            key: "expired",
+        }, loading === "requeueExpired" ? "处理中…" : "放回过期"),
     ]);
 }
 
@@ -362,7 +379,8 @@ export function TaskTable({ tasks, state, stats, search, readOnly, loading, onVi
                 h("th", {}, "状态"),
                 h("th", {}, "Action"),
                 h("th", {}, "Payload"),
-                h("th", {}, "时间"),
+                h("th", {}, "发布时间"),
+                h("th", {}, "完成时间"),
             ])),
             h("tbody", { key: "body" }, tasks.map((task) => {
                 const state = taskState(task);
@@ -388,7 +406,8 @@ export function TaskTable({ tasks, state, stats, search, readOnly, loading, onVi
                     h("td", {}, h(Badge, { state })),
                     h("td", {}, task.action || "-"),
                     h("td", { className: "payload-cell" }, summarize(task.payload ?? task)),
-                    h("td", { className: "muted" }, formatTime(task.created_at || task.updated_at || task.run_at)),
+                    h("td", { className: "muted" }, formatTime(task.created_at)),
+                    h("td", { className: "muted" }, task.status === "completed" || task.status === "failed" ? formatTime(task.updated_at) : "-"),
                 ]);
             })),
         ])
@@ -500,7 +519,7 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
     ]);
 }
 
-export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySeconds, onPayload, onDelay, onPush }) {
+export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySeconds, expireSeconds, onPayload, onDelay, onExpire, onPush }) {
     const isBusy = !!loading;
     return h("details", { className: "panel push-panel" }, [
         h("summary", { className: "panel-summary", key: "summary" }, "投递任务"),
@@ -516,14 +535,27 @@ export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySecon
             h("div", { className: "button-row", style: { marginTop: "10px" }, key: "row" }, [
                 h("input", {
                     className: "input",
-                    style: { width: "130px" },
+                    style: { width: "80px" },
                     type: "number",
                     min: "0",
                     title: "延迟秒数",
+                    placeholder: "延迟(s)",
                     disabled: readOnly || isBusy,
                     value: delaySeconds,
                     onChange: (event) => onDelay(Number(event.target.value || 0)),
                     key: "delay",
+                }),
+                h("input", {
+                    className: "input",
+                    style: { width: "80px" },
+                    type: "number",
+                    min: "0",
+                    title: "过期秒数",
+                    placeholder: "过期(s)",
+                    disabled: readOnly || isBusy,
+                    value: expireSeconds,
+                    onChange: (event) => onExpire(Number(event.target.value || 0)),
+                    key: "expire",
                 }),
                 h("button", {
                     className: `btn primary${loading === "push" ? " loading" : ""}`,

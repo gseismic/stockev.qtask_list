@@ -1,4 +1,4 @@
-export const states = ["all", "ready", "processing", "retry", "dlq", "delay", "history"];
+export const states = ["all", "ready", "processing", "retry", "dlq", "delay", "completed", "failed", "expired", "history"];
 
 export function stateLabel(state) {
     const labels = {
@@ -8,6 +8,9 @@ export function stateLabel(state) {
         retry: "待重试",
         dlq: "死信",
         delay: "延迟",
+        completed: "已完成",
+        failed: "已失败",
+        expired: "已过期",
         history: "历史",
         active: "活跃",
         stale: "失联",
@@ -30,6 +33,9 @@ export function queueActivityCount(queue = {}) {
 export function stateCount(stats = {}, state = "all") {
     if (state === "all") return liveCount(stats);
     if (state === "ready") return Number(stats.queue || 0);
+    if (state === "completed") return Number(stats.completed || 0);
+    if (state === "failed") return Number(stats.failed || 0);
+    if (state === "expired") return Number(stats.expired || 0);
     return Number(stats[state] || 0);
 }
 
@@ -169,7 +175,7 @@ export function formatTime(timestamp) {
 }
 
 export function canRequeue(task) {
-    return ["retry", "dlq", "delay", "processing"].includes(taskState(task));
+    return ["retry", "dlq", "delay", "processing", "expired"].includes(taskState(task));
 }
 
 export function confirmDanger(message) {

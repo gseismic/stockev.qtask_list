@@ -504,8 +504,14 @@ button {
     color: #9a3412;
 }
 
-.system-banner span {
-    color: #9a3412;
+.system-banner.loading {
+    background: #f0f8ff;
+    border-bottom: 1px solid #b8d4f0;
+    color: #1e40af;
+}
+
+.system-banner.loading span {
+    color: #2563eb;
 }
 
 .issue-banner {

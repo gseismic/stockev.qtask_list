@@ -33,19 +33,28 @@ export const api = {
     queues: () => request("/api/queues"),
     workers: (queue = "") => request(`/api/workers${queue ? `?queue=${queuePath(queue)}` : ""}`),
     diagnose: (queue) => request(`/api/queue/${queuePath(queue)}/diagnose`),
-    queueTasks: ({ queue, state, search, limit = 100 }) => {
+    queueTasks: ({ queue, state, search, limit = 100, createdAfter, createdBefore, completedAfter, completedBefore }) => {
         const params = new URLSearchParams({ state, limit: String(limit) });
         if (search) params.set("search", search);
+        if (createdAfter) params.set("created_after", String(createdAfter));
+        if (createdBefore) params.set("created_before", String(createdBefore));
+        if (completedAfter) params.set("completed_after", String(completedAfter));
+        if (completedBefore) params.set("completed_before", String(completedBefore));
         return request(`/api/queue/${queuePath(queue)}/tasks?${params.toString()}`);
     },
-    pushTask: (queue, payload, delaySeconds = 0) =>
+    pushTask: (queue, payload, delaySeconds = 0, expireSeconds = 0) =>
         request(`/api/queue/${queuePath(queue)}/tasks`, {
             method: "POST",
-            body: JSON.stringify({ payload, delay_seconds: delaySeconds }),
+            body: JSON.stringify({ payload, delay_seconds: delaySeconds, expire_seconds: expireSeconds }),
         }),
     retryQueue: (queue) => request(`/api/queue/${queuePath(queue)}/retry`, { method: "POST" }),
     requeueDlq: (queue, taskId = null) =>
         request(`/api/queue/${queuePath(queue)}/requeue-dlq`, {
+            method: "POST",
+            body: JSON.stringify({ task_id: taskId }),
+        }),
+    requeueExpired: (queue, taskId = null) =>
+        request(`/api/queue/${queuePath(queue)}/requeue-expired`, {
             method: "POST",
             body: JSON.stringify({ task_id: taskId }),
         }),

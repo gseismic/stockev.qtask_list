@@ -47,6 +47,7 @@ app.add_middleware(
 class PushTaskRequest(BaseModel):
     payload: Dict[str, Any]
     delay_seconds: int = Field(default=0, ge=0)
+    expire_seconds: int = Field(default=0, ge=0)
 
 
 class RecoverRequest(BaseModel):
@@ -179,9 +180,22 @@ def api_queue_tasks(
     state: QueueState = Query(QueueState.all, description="Task state"),
     search: Optional[str] = Query(None, description="Search in task data"),
     limit: int = Query(50, ge=1, le=500),
+    created_after: Optional[float] = Query(None, description="Unix timestamp"),
+    created_before: Optional[float] = Query(None, description="Unix timestamp"),
+    completed_after: Optional[float] = Query(None, description="Unix timestamp"),
+    completed_before: Optional[float] = Query(None, description="Unix timestamp"),
     _auth: None = Depends(require_auth),
 ):
-    tasks = admin.list_tasks(name, state=state, limit=limit, search=search)
+    tasks = admin.list_tasks(
+        name,
+        state=state,
+        limit=limit,
+        search=search,
+        created_after=created_after,
+        created_before=created_before,
+        completed_after=completed_after,
+        completed_before=completed_before,
+    )
     return {"queue": name, "state": state.value, "tasks": tasks, "count": len(tasks)}
 
 
@@ -196,7 +210,12 @@ def api_push_task(
     request: PushTaskRequest,
     _auth: None = Depends(require_auth),
 ):
-    return admin.push_task(name, request.payload, delay_seconds=request.delay_seconds)
+    return admin.push_task(
+        name,
+        request.payload,
+        delay_seconds=request.delay_seconds,
+        expire_seconds=request.expire_seconds,
+    )
 
 
 @app.post("/api/queue/{name}/retry")
@@ -211,6 +230,29 @@ def api_requeue_dlq(
     _auth: None = Depends(require_auth),
 ):
     return admin.requeue_dlq(name, task_id=request.task_id)
+
+
+@app.get("/api/queue/{name}/expired")
+def api_queue_expired(
+    name: str,
+    limit: int = Query(50, ge=1, le=500),
+    _auth: None = Depends(require_auth),
+):
+    tasks = admin.list_expired(name, limit=limit)
+    return {"queue": name, "tasks": tasks, "count": len(tasks)}
+
+
+class RequeueExpiredRequest(BaseModel):
+    task_id: Optional[str] = None
+
+
+@app.post("/api/queue/{name}/requeue-expired")
+def api_requeue_expired(
+    name: str,
+    request: RequeueExpiredRequest,
+    _auth: None = Depends(require_auth),
+):
+    return admin.requeue_expired(name, task_id=request.task_id)
 
 
 @app.post("/api/queue/{name}/recover")

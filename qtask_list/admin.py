@@ -21,6 +21,9 @@ class QueueState(str, Enum):
     dlq = "dlq"
     delay = "delay"
     history = "history"
+    completed = "completed"
+    failed = "failed"
+    expired = "expired"
     all = "all"
 
 
@@ -67,6 +70,7 @@ class QueueAdmin:
     def queue_stats(self, queue_name: str) -> Dict[str, int]:
         workers = self.list_workers(queue_name)
         history_counts = self._history_stats(queue_name)
+        expired_count = self._expired_count(queue_name)
         return {
             "queue": int(self.r.llen(queue_name)),
             "processing": sum(int(self.r.llen(key)) for key in self.processing_keys(queue_name)),
@@ -76,6 +80,7 @@ class QueueAdmin:
             "history": history_counts["total"],
             "completed": history_counts["completed"],
             "failed": history_counts["failed"],
+            "expired": expired_count,
             "active_workers": sum(1 for worker in workers if worker["active"]),
             "stale_workers": sum(1 for worker in workers if not worker["active"]),
         }
@@ -111,6 +116,30 @@ class QueueAdmin:
             "completed": int(sampled_completed * ratio),
             "failed": int(sampled_failed * ratio),
         }
+
+    def _expired_count(self, queue_name: str, sample_limit: int = 200) -> int:
+        hist_key = f"qtask:hist:{queue_name}"
+        task_ids = self.r.zrevrange(hist_key, 0, sample_limit - 1)
+        if not task_ids:
+            return 0
+        now = time.time()
+        expired = 0
+        for task_id in task_ids:
+            data = self.get_task(task_id)
+            if not data:
+                continue
+            expires_at = data.get("expires_at")
+            status = data.get("status", "")
+            if (
+                expires_at
+                and float(expires_at) < now
+                and status not in ("completed", "failed")
+            ):
+                expired += 1
+        total = int(self.r.zcard(hist_key) or 0)
+        if total <= sample_limit:
+            return expired
+        return int(expired * (total / len(task_ids)))
 
     def processing_keys(self, queue_name: str, include_legacy: bool = True) -> List[str]:
         keys = set(self.r.scan_iter(f"{queue_name}:processing:*"))
@@ -167,6 +196,10 @@ class QueueAdmin:
         state: QueueState | str = QueueState.all,
         limit: int = 50,
         search: Optional[str] = None,
+        created_after: Optional[float] = None,
+        created_before: Optional[float] = None,
+        completed_after: Optional[float] = None,
+        completed_before: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         selected_state = QueueState(state)
         if selected_state == QueueState.all:
@@ -177,6 +210,22 @@ class QueueAdmin:
                 QueueState.dlq,
                 QueueState.delay,
             ]
+        elif selected_state in (QueueState.completed, QueueState.failed):
+            # 按 status 过滤 history
+            status = selected_state.value
+            rows = self._read_history_by_status(queue_name, limit, status)
+            rows = self._apply_time_filters(rows, created_after, created_before, completed_after, completed_before)
+            if search:
+                needle = search.lower()
+                rows = [r for r in rows if needle in json.dumps(r, ensure_ascii=False, default=str).lower()]
+            return rows[:limit]
+        elif selected_state == QueueState.expired:
+            rows = self._read_expired(queue_name, limit * 3)
+            rows = self._apply_time_filters(rows, created_after, created_before)
+            if search:
+                needle = search.lower()
+                rows = [r for r in rows if needle in json.dumps(r, ensure_ascii=False, default=str).lower()]
+            return rows[:limit]
         else:
             states = [selected_state]
 
@@ -189,6 +238,7 @@ class QueueAdmin:
 
         self._supplement_action_from_history(rows)
 
+        rows = self._apply_time_filters(rows, created_after, created_before)
         if search:
             needle = search.lower()
             rows = [
@@ -197,6 +247,26 @@ class QueueAdmin:
                 if needle in json.dumps(row, ensure_ascii=False, default=str).lower()
             ]
         return rows[:limit]
+
+    @staticmethod
+    def _apply_time_filters(
+        rows: List[Dict[str, Any]],
+        created_after: Optional[float] = None,
+        created_before: Optional[float] = None,
+        completed_after: Optional[float] = None,
+        completed_before: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """对任务列表应用时间范围筛选。"""
+        result = rows
+        if created_after is not None:
+            result = [r for r in result if r.get("created_at") and float(r["created_at"]) >= created_after]
+        if created_before is not None:
+            result = [r for r in result if r.get("created_at") and float(r["created_at"]) <= created_before]
+        if completed_after is not None:
+            result = [r for r in result if r.get("updated_at") and float(r["updated_at"]) >= completed_after]
+        if completed_before is not None:
+            result = [r for r in result if r.get("updated_at") and float(r["updated_at"]) <= completed_before]
+        return result
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         key = f"qtask:task:{task_id}"
@@ -343,9 +413,10 @@ class QueueAdmin:
         queue_name: str,
         payload: Dict[str, Any],
         delay_seconds: int = 0,
+        expire_seconds: int = 0,
     ) -> Dict[str, Any]:
         queue = self._smart_queue(queue_name)
-        task_id = queue.push(payload, delay_seconds=delay_seconds)
+        task_id = queue.push(payload, delay_seconds=delay_seconds, expire_seconds=expire_seconds)
         return {"queue": queue.base, "task_id": task_id, "delay_seconds": delay_seconds}
 
     def move_retry(self, queue_name: str) -> Dict[str, int]:
@@ -552,6 +623,90 @@ class QueueAdmin:
             data["_source"] = hist_key
             rows.append(data)
         return rows
+
+    def _read_history_by_status(
+        self, queue_name: str, limit: int, status: str
+    ) -> List[Dict[str, Any]]:
+        hist_key = f"qtask:hist:{queue_name}"
+        scan_limit = max(limit * 3, 300)
+        task_ids = self.r.zrevrange(hist_key, 0, scan_limit - 1)
+        rows = []
+        now = time.time()
+        for task_id in task_ids:
+            data = self.get_task(task_id)
+            if not data:
+                continue
+            if data.get("status") != status:
+                continue
+            data["_queue"] = queue_name
+            data["_state"] = status
+            data["_source"] = hist_key
+            rows.append(data)
+            if len(rows) >= limit:
+                break
+        return rows
+
+    def _read_expired(self, queue_name: str, scan_limit: int = 200) -> List[Dict[str, Any]]:
+        hist_key = f"qtask:hist:{queue_name}"
+        task_ids = self.r.zrevrange(hist_key, 0, min(scan_limit, 2000) - 1)
+        expired = []
+        now = time.time()
+        for task_id in task_ids:
+            data = self.get_task(task_id)
+            if not data:
+                continue
+            expires_at = data.get("expires_at")
+            status = data.get("status", "")
+            if (
+                expires_at
+                and float(expires_at) < now
+                and status not in ("completed", "failed")
+            ):
+                data["_queue"] = queue_name
+                data["_state"] = QueueState.expired.value
+                data["_source"] = hist_key
+                expired.append(data)
+            if len(expired) >= 50:
+                break
+        return expired
+
+    def list_expired(self, queue_name: str, limit: int = 50) -> List[Dict[str, Any]]:
+        return self._read_expired(queue_name, scan_limit=max(limit * 3, 300))
+
+    def requeue_expired(
+        self, queue_name: str, task_id: Optional[str] = None
+    ) -> Dict[str, int]:
+        if task_id:
+            return self._requeue_single_expired(queue_name, task_id)
+
+        expired = self._read_expired(queue_name, scan_limit=500)
+        moved = 0
+        for task in expired:
+            tid = task.get("task_id")
+            if not tid:
+                continue
+            result = self._requeue_single_expired(queue_name, tid)
+            moved += result["moved"]
+        return {"moved": moved}
+
+    def _requeue_single_expired(self, queue_name: str, task_id: str) -> Dict[str, Any]:
+        data = self.get_task(task_id)
+        if not data:
+            return {"moved": 0, "task_id": task_id}
+        payload = data.get("payload", {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+        action = data.get("action", payload.get("action", "") if isinstance(payload, dict) else "")
+        msg = json.dumps({
+            "task_id": task_id,
+            "payload": payload if isinstance(payload, str) else json.dumps(payload),
+        })
+        self.r.lpush(queue_name, msg)
+        self._update_history(task_id, {"status": "pending"})
+        return {"moved": 1, "task_id": task_id, "queue": queue_name}
 
     def _decode_message(
         self,

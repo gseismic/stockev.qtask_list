@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 import redis
@@ -321,3 +322,164 @@ def test_dashboard_payload_endpoint_for_large_without_storage(client, r):
     assert result["action"] == "scrape_fin_sheet"
     assert result["payload"]["_large"] is True
     assert "未配置" in result["_note"]
+
+
+# ── 过期任务测试 ──
+
+def test_dashboard_push_with_expire(client, r):
+    """推送带过期时间的任务。"""
+    import time
+    queue = "qtask_dash_test:expire:fetch"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    response = client.post(
+        f"/api/queue/{queue}/tasks",
+        json={"payload": {"action": "test_expire"}, "expire_seconds": 1},
+    )
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+
+    record = r.hgetall(f"qtask:task:{task_id}")
+    assert "expires_at" in record
+    assert float(record["expires_at"]) > time.time()
+
+    r.delete(f"qtask:task:{task_id}")
+
+
+def test_dashboard_list_expired(client, r):
+    """列出过期任务。"""
+    import time
+    queue = "qtask_dash_test:expired:fetch"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    task_id = "exp-task-01"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id, "status": "pending", "action": "expired_action",
+        "expires_at": str(now - 10),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+
+    response = client.get(f"/api/queue/{queue}/expired")
+    assert response.status_code == 200
+    assert response.json()["count"] >= 1
+    tasks = response.json()["tasks"]
+    assert any(t["task_id"] == task_id for t in tasks)
+
+    r.delete(f"qtask:task:{task_id}")
+    r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_requeue_expired(client, r):
+    """放回过期任务。"""
+    import time
+    queue = "qtask_dash_test:expired:requeue"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    task_id = "exp-task-02"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id, "status": "pending", "action": "expired_action",
+        "expires_at": str(now - 10), "payload": json.dumps({"action": "expired_action"}),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+
+    response = client.post(
+        f"/api/queue/{queue}/requeue-expired",
+        json={"task_id": task_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["moved"] == 1
+
+    record = r.hgetall(f"qtask:task:{task_id}")
+    assert record["status"] == "pending"
+
+    r.delete(queue)
+    r.delete(f"qtask:task:{task_id}")
+    r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_queue_stats_includes_expired(client, r):
+    """queue_stats 包含 expired 计数。"""
+    import time
+    queue = "qtask_dash_test:stats:expired"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    task_id = "exp-task-03"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id, "status": "pending", "action": "expired_action",
+        "expires_at": str(now - 10),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+
+    response = client.get("/api/queues")
+    assert response.status_code == 200
+    stats = next((q for q in response.json() if q["name"] == queue), None)
+    assert stats is not None
+    assert "expired" in stats
+    assert stats["expired"] >= 1
+
+    r.delete(f"qtask:task:{task_id}")
+    r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_list_completed_tasks(client, r):
+    """按已完成状态过滤任务。"""
+    queue = "qtask_dash_test:completed:tasks"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    task_id = "comp-task-01"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id, "status": "completed", "action": "done_action",
+        "created_at": str(now - 100), "updated_at": str(now - 50),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 50})
+
+    response = client.get(f"/api/queue/{queue}/tasks", params={"state": "completed"})
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert any(t["task_id"] == task_id and t["_state"] == "completed" for t in tasks)
+
+    r.delete(f"qtask:task:{task_id}")
+    r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_time_filter(client, r):
+    """时间范围筛选任务。"""
+    queue = "qtask_dash_test:timefilter"
+    r.delete(queue)
+    r.delete(f"qtask:hist:{queue}")
+
+    task_id = "time-task-01"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id, "status": "completed", "action": "time_action",
+        "created_at": str(now - 200), "updated_at": str(now - 50),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 50})
+
+    response = client.get(
+        f"/api/queue/{queue}/tasks",
+        params={"state": "completed", "created_after": now - 300, "created_before": now - 100},
+    )
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert any(t["task_id"] == task_id for t in tasks)
+
+    response = client.get(
+        f"/api/queue/{queue}/tasks",
+        params={"state": "completed", "created_after": now - 50},
+    )
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert not any(t["task_id"] == task_id for t in tasks)
+
+    r.delete(f"qtask:task:{task_id}")
+    r.delete(f"qtask:hist:{queue}")
