@@ -38,6 +38,7 @@ function App() {
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [lastUpdate, setLastUpdate] = useState("");
     const [toast, setToast] = useState("");
+    const [loadingAction, setLoadingAction] = useState(null);
     const [payloadText, setPayloadText] = useState('{\n  "action": "example"\n}');
     const [delaySeconds, setDelaySeconds] = useState(0);
 
@@ -127,21 +128,25 @@ function App() {
         return () => window.clearInterval(timer);
     }, [autoRefresh, refresh]);
 
-    async function runAction(action, successMessage) {
+    async function runAction(action, successMessage, actionName) {
+        setLoadingAction(actionName || null);
         try {
             await action();
             notify(successMessage);
             await refresh();
         } catch (error) {
             notify(error.message);
+        } finally {
+            setLoadingAction(null);
         }
     }
 
-    const retryQueue = (queue) => runAction(() => api.retryQueue(queue), "retry 已移回 ready");
-    const requeueDlq = (queue) => runAction(() => api.requeueDlq(queue), "DLQ 已重放");
+    const retryQueue = (queue) => runAction(() => api.retryQueue(queue), "retry 已移回 ready", "retry");
+    const requeueDlq = (queue) => runAction(() => api.requeueDlq(queue), "DLQ 已重放", "requeueDlq");
     const recoverQueue = (queue, includeActive) => runAction(
         () => api.recoverQueue(queue, includeActive),
-        includeActive ? "已强制恢复 processing" : "已恢复 stale processing"
+        includeActive ? "已强制恢复 processing" : "已恢复 stale processing",
+        includeActive ? "recoverActive" : "recover"
     );
     const recoverActive = (queue) => {
         if (confirmDanger("强制恢复可能抢回活跃 Worker 正在处理的任务，继续？")) {
@@ -150,7 +155,7 @@ function App() {
     };
     const clearQueue = (queue) => {
         if (confirmDanger("清空队列会删除 ready/processing/retry/delay/DLQ，继续？")) {
-            runAction(() => api.clearQueue(queue, true, false), "队列已清空");
+            runAction(() => api.clearQueue(queue, true, false), "队列已清空", "clear");
         }
     };
     const requeueTask = (task) => {
@@ -159,19 +164,19 @@ function App() {
         if (fromState === "processing" && !confirmDanger("从 processing 重试可能影响正在运行的 Worker，继续？")) {
             return;
         }
-        runAction(() => api.requeueTask(task.task_id, queue, fromState), "任务已重试");
+        runAction(() => api.requeueTask(task.task_id, queue, fromState), "任务已重试", "requeueTask");
     };
     const deleteTask = (task) => {
         const queue = task._queue || effectiveQueue;
         if (confirmDanger(`删除任务 ${task.task_id}，继续？`)) {
-            runAction(() => api.deleteTask(task.task_id, queue), "任务已删除");
+            runAction(() => api.deleteTask(task.task_id, queue), "任务已删除", "deleteTask");
             setSelectedTask(null);
         }
     };
     const pushTask = (queue) => {
         try {
             const payload = JSON.parse(payloadText);
-            runAction(() => api.pushTask(queue, payload, delaySeconds), "任务已投递");
+            runAction(() => api.pushTask(queue, payload, delaySeconds), "任务已投递", "push");
         } catch (error) {
             notify(`Payload JSON 无效：${error.message}`);
         }
@@ -236,6 +241,7 @@ function App() {
                                 queue: effectiveQueue,
                                 stats,
                                 readOnly,
+                                loading: loadingAction,
                                 onRetry: retryQueue,
                                 onRequeueDlq: requeueDlq,
                                 onRecover: recoverQueue,
@@ -249,6 +255,7 @@ function App() {
                                 stats,
                                 search: taskSearch,
                                 readOnly,
+                                loading: loadingAction,
                                 onSearch: setTaskSearch,
                                 onState: setState,
                                 onView: setSelectedTask,
@@ -265,6 +272,7 @@ function App() {
                             queue: effectiveQueue,
                             stats,
                             readOnly,
+                            loading: loadingAction,
                             onRecoverActive: recoverActive,
                             onClear: clearQueue,
                             key: "danger",
@@ -273,6 +281,7 @@ function App() {
                         h(PushTaskForm, {
                             queue: effectiveQueue,
                             readOnly,
+                            loading: loadingAction,
                             payloadText,
                             delaySeconds,
                             onPayload: setPayloadText,
@@ -287,6 +296,7 @@ function App() {
         h(TaskDrawer, {
             task: selectedTask,
             readOnly,
+            loading: loadingAction,
             onClose: () => setSelectedTask(null),
             onRequeue: requeueTask,
             onDelete: deleteTask,

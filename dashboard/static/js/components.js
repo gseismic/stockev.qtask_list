@@ -149,39 +149,41 @@ export function StateTabs({ selectedState, onState, stats }) {
     );
 }
 
-export function QueueActions({ queue, stats, readOnly, onRetry, onRequeueDlq, onRecover }) {
+export function QueueActions({ queue, stats, readOnly, loading, onRetry, onRequeueDlq, onRecover }) {
     const retryDisabled = Number(stats.retry || 0) === 0;
     const dlqDisabled = Number(stats.dlq || 0) === 0;
     const processingDisabled = Number(stats.processing || 0) === 0;
+    const isBusy = !!loading;
 
     return h("div", { className: "button-row" }, [
         h("button", {
-            className: "btn",
-            disabled: readOnly || retryDisabled,
+            className: `btn${loading === "retry" ? " loading" : ""}`,
+            disabled: readOnly || retryDisabled || isBusy,
             onClick: () => onRetry(queue),
             title: readOnly ? "连接异常时不能执行写操作" : (retryDisabled ? "没有待重试任务" : "将待重试任务移回待处理"),
             key: "retry",
-        }, "重试队列"),
+        }, loading === "retry" ? "处理中…" : "重试队列"),
         h("button", {
-            className: "btn",
-            disabled: readOnly || dlqDisabled,
+            className: `btn${loading === "requeueDlq" ? " loading" : ""}`,
+            disabled: readOnly || dlqDisabled || isBusy,
             onClick: () => onRequeueDlq(queue),
             title: readOnly ? "连接异常时不能执行写操作" : (dlqDisabled ? "没有死信任务" : "将死信任务移回待处理"),
             key: "dlq",
-        }, "重放死信"),
+        }, loading === "requeueDlq" ? "处理中…" : "重放死信"),
         h("button", {
-            className: "btn",
-            disabled: readOnly || processingDisabled,
+            className: `btn${loading === "recover" || loading === "recoverActive" ? " loading" : ""}`,
+            disabled: readOnly || processingDisabled || isBusy,
             onClick: () => onRecover(queue, false),
             title: readOnly ? "连接异常时不能执行写操作" : (processingDisabled ? "没有处理中任务" : "恢复失联 Worker 的处理中任务"),
             key: "recover",
-        }, "安全恢复"),
+        }, loading === "recover" ? "处理中…" : "安全恢复"),
     ]);
 }
 
-export function DangerActions({ queue, stats, readOnly, onRecoverActive, onClear }) {
+export function DangerActions({ queue, stats, readOnly, loading, onRecoverActive, onClear }) {
     const processingDisabled = Number(stats.processing || 0) === 0;
     const clearDisabled = liveCount(stats) === 0;
+    const isBusy = !!loading;
 
     return h("details", { className: "panel danger-panel" }, [
         h("summary", { className: "panel-summary danger-summary", key: "summary" }, "危险操作"),
@@ -189,19 +191,19 @@ export function DangerActions({ queue, stats, readOnly, onRecoverActive, onClear
             h("p", { className: "muted action-note", key: "note" }, "这些动作会移动或删除任务，只在明确知道影响范围时使用。"),
             h("div", { className: "button-row", key: "actions" }, [
                 h("button", {
-                    className: "btn danger",
-                    disabled: readOnly || processingDisabled,
+                    className: `btn danger${loading === "recoverActive" ? " loading" : ""}`,
+                    disabled: readOnly || processingDisabled || isBusy,
                     onClick: () => onRecoverActive(queue),
                     title: readOnly ? "连接异常时不能执行写操作" : (processingDisabled ? "没有处理中任务" : "强制恢复所有处理中任务"),
                     key: "force",
-                }, "强制恢复"),
+                }, loading === "recoverActive" ? "处理中…" : "强制恢复"),
                 h("button", {
-                    className: "btn danger",
-                    disabled: readOnly || clearDisabled,
+                    className: `btn danger${loading === "clear" ? " loading" : ""}`,
+                    disabled: readOnly || clearDisabled || isBusy,
                     onClick: () => onClear(queue),
                     title: readOnly ? "连接异常时不能执行写操作" : (clearDisabled ? "当前没有可清空的任务" : "清空当前生命周期队列"),
                     key: "clear",
-                }, "清空队列"),
+                }, loading === "clear" ? "处理中…" : "清空队列"),
             ]),
         ]),
     ]);
@@ -226,6 +228,7 @@ export function TaskSamples({
     stats,
     search,
     readOnly,
+    loading,
     onSearch,
     onState,
     onView,
@@ -254,6 +257,7 @@ export function TaskSamples({
                 stats,
                 search,
                 readOnly,
+                loading,
                 onView,
                 onRequeue,
                 onDelete,
@@ -272,10 +276,11 @@ function emptyTaskText({ state, stats, search }) {
     return state === "all" ? "当前没有任务" : `没有${stateLabel(state)}任务`;
 }
 
-export function TaskTable({ tasks, state, stats, search, readOnly, onView, onRequeue, onDelete }) {
+export function TaskTable({ tasks, state, stats, search, readOnly, loading, onView, onRequeue, onDelete }) {
     if (!tasks.length) {
         return h("div", { className: "empty" }, emptyTaskText({ state, stats, search }));
     }
+    const isBusy = !!loading;
     return h("div", { className: "table-wrap" },
         h("table", { className: "table" }, [
             h("thead", { key: "head" }, h("tr", {}, [
@@ -291,17 +296,17 @@ export function TaskTable({ tasks, state, stats, search, readOnly, onView, onReq
                 return h("tr", { key: `${task._source || "task"}:${task.task_id || Math.random()}` }, [
                     h("td", { className: "mono" }, shortId(task.task_id)),
                     h("td", {}, h("div", { className: "button-row row-actions" }, [
-                        h("button", { className: "btn", onClick: () => onView(task), key: "view" }, "查看"),
+                        h("button", { className: "btn", onClick: () => onView(task), disabled: isBusy, key: "view" }, "查看"),
                         canRequeue(task) ? h("button", {
-                            className: "btn",
-                            disabled: readOnly,
+                            className: `btn${loading === "requeueTask" ? " loading" : ""}`,
+                            disabled: readOnly || isBusy,
                             onClick: () => onRequeue(task),
                             title: readOnly ? "连接异常时不能执行写操作" : "重试任务",
                             key: "requeue",
-                        }, "重试") : null,
+                        }, loading === "requeueTask" ? "…" : "重试") : null,
                         task.task_id ? h("button", {
                             className: "btn danger",
-                            disabled: readOnly,
+                            disabled: readOnly || isBusy,
                             onClick: () => onDelete(task),
                             title: readOnly ? "连接异常时不能执行写操作" : "删除任务",
                             key: "delete",
@@ -339,29 +344,30 @@ export function DiagnosePanel({ diagnose, workers }) {
     ]);
 }
 
-export function TaskDrawer({ task, readOnly, onClose, onRequeue, onDelete }) {
+export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDelete }) {
     if (!task) return null;
     const state = taskState(task);
+    const isBusy = !!loading;
     return h(React.Fragment, {}, [
         h("div", { className: "drawer-backdrop", onClick: onClose, key: "backdrop" }),
         h("aside", { className: "drawer", key: "drawer" }, [
             h("div", { className: "drawer-header", key: "header" }, [
                 h("strong", {}, shortId(task.task_id)),
-                h("button", { className: "btn", onClick: onClose }, "关闭"),
+                h("button", { className: "btn", onClick: onClose, disabled: isBusy }, "关闭"),
             ]),
             h("div", { className: "drawer-body", key: "body" }, [
                 h("div", { className: "button-row", key: "actions" }, [
                     h(Badge, { state, key: "badge" }),
                     canRequeue(task) ? h("button", {
-                        className: "btn primary",
-                        disabled: readOnly,
+                        className: `btn primary${loading === "requeueTask" ? " loading" : ""}`,
+                        disabled: readOnly || isBusy,
                         onClick: () => onRequeue(task),
                         title: readOnly ? "连接异常时不能执行写操作" : "重试任务",
                         key: "requeue",
-                    }, "重试") : null,
+                    }, loading === "requeueTask" ? "处理中…" : "重试") : null,
                     task.task_id ? h("button", {
                         className: "btn danger",
-                        disabled: readOnly,
+                        disabled: readOnly || isBusy,
                         onClick: () => onDelete(task),
                         title: readOnly ? "连接异常时不能执行写操作" : "删除任务",
                         key: "delete",
@@ -376,7 +382,8 @@ export function TaskDrawer({ task, readOnly, onClose, onRequeue, onDelete }) {
     ]);
 }
 
-export function PushTaskForm({ queue, readOnly, payloadText, delaySeconds, onPayload, onDelay, onPush }) {
+export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySeconds, onPayload, onDelay, onPush }) {
+    const isBusy = !!loading;
     return h("details", { className: "panel push-panel" }, [
         h("summary", { className: "panel-summary", key: "summary" }, "投递任务"),
         h("div", { className: "panel-body", key: "body" }, [
@@ -384,7 +391,7 @@ export function PushTaskForm({ queue, readOnly, payloadText, delaySeconds, onPay
                 className: "textarea",
                 value: payloadText,
                 placeholder: "JSON payload",
-                disabled: readOnly,
+                disabled: readOnly || isBusy,
                 onChange: (event) => onPayload(event.target.value),
                 key: "payload",
             }),
@@ -395,18 +402,18 @@ export function PushTaskForm({ queue, readOnly, payloadText, delaySeconds, onPay
                     type: "number",
                     min: "0",
                     title: "延迟秒数",
-                    disabled: readOnly,
+                    disabled: readOnly || isBusy,
                     value: delaySeconds,
                     onChange: (event) => onDelay(Number(event.target.value || 0)),
                     key: "delay",
                 }),
                 h("button", {
-                    className: "btn primary",
-                    disabled: readOnly,
+                    className: `btn primary${loading === "push" ? " loading" : ""}`,
+                    disabled: readOnly || isBusy,
                     title: readOnly ? "连接异常时不能投递任务" : "投递任务",
                     onClick: () => onPush(queue),
                     key: "push",
-                }, "投递"),
+                }, loading === "push" ? "投递中…" : "投递"),
             ]),
         ]),
     ]);

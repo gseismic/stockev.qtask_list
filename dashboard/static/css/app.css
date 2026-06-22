@@ -535,6 +535,16 @@ button {
     cursor: not-allowed;
 }
 
+.btn.loading {
+    animation: pulse 1s ease-in-out infinite;
+    cursor: wait;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
 .badge {
     display: inline-flex;
     align-items: center;
