@@ -55,6 +55,8 @@ task_id = q.push({"action": "fetch_stock", "symbol": "AAPL"})
 task_ids = q.push_batch([{"action": "fetch_stock", "symbol": "AAPL"}, ...])
 # 延迟 (60 秒后执行)
 task_id = q.push({"action": "send_email"}, delay_seconds=60)
+# 业务过期 (1 小时后仍未完成则进入 expired 视图)
+task_id = q.push({"action": "expire_if_slow"}, expire_seconds=3600)
 ```
 
 **消费端**：
@@ -121,13 +123,21 @@ from qtask_list import QueueAdmin, QueueState
 admin = QueueAdmin("redis://localhost:6379/0")
 
 # 发现
-admin.list_queues()          # 返回 [{name, queue, processing, retry, dlq, delay, history, active_workers, stale_workers}]
+admin.list_queues()          # 返回 [{name, queue, processing, retry, dlq, delay, history, completed, failed, expired, active_workers, stale_workers}]
 admin.list_workers("stockev:fetch")  # Worker 信息列表
 
 # 读取任务
 admin.list_tasks("stockev:fetch", state=QueueState.dlq, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.history, limit=50)
+admin.list_tasks("stockev:fetch", state=QueueState.completed, limit=50)
+admin.list_tasks("stockev:fetch", state=QueueState.failed, limit=50)
+admin.list_tasks("stockev:fetch", state=QueueState.expired, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.all, search="AAPL")
+admin.list_tasks(
+    "stockev:fetch",
+    state=QueueState.completed,
+    completed_after=1717200000,
+)
 admin.get_task("<task_id>")
 
 # 诊断
@@ -136,20 +146,27 @@ admin.diagnose("stockev:fetch")  # 返回 stats + suggestions
 # 控制
 admin.push_task("stockev:fetch", {"action": "test", "data": 1})
 admin.push_task("stockev:fetch", {"action": "test"}, delay_seconds=60)
+admin.push_task("stockev:fetch", {"action": "test"}, expire_seconds=3600)
 admin.move_retry("stockev:fetch")         # retry → ready
 admin.requeue_dlq("stockev:fetch")        # dlq → ready（全部）
 admin.requeue_task("stockev:fetch", "<id>", from_state=QueueState.dlq)  # 单条
+admin.list_expired("stockev:fetch", limit=100)
+admin.requeue_expired("stockev:fetch")    # expired → ready（默认批量上限 500）
+admin.requeue_expired("stockev:fetch", task_id="<id>")  # 单条过期任务放回 ready
 admin.recover("stockev:fetch")            # 安全恢复（仅 stale worker）
 admin.recover("stockev:fetch", include_active=True)  # 强制恢复活跃 Worker
 admin.delete_task("<task_id>")
 admin.delete_task("<task_id>", queue_name="stockev:fetch")
+admin.delete_queue("stockev:fetch")  # 删除整条队列及历史，谨慎使用
 admin.clear_queue("stockev:fetch")
 admin.clear_queue("stockev:fetch", include_history=True)  # 连带历史
 admin.clean_history("stockev:fetch", ttl_days=15)
 admin.clean_history(ttl_days=15)  # 全部队列
 ```
 
-**QueueState 枚举**：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `all`
+**QueueState 枚举**：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `expired`, `all`
+
+`expired` 表示业务任务过期：投递时通过 `expire_seconds` 写入 `expires_at`，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
 
 ### TaskHistory（Redis 任务历史）
 
@@ -266,13 +283,15 @@ start_dashboard(port=8765, redis_url="redis://localhost:6379/0")
 ```
 
 访问 `http://localhost:8765`，功能：
-- 队列状态一览（ready/processing/retry/dlq/delay/history）
+- 队列状态一览（ready/processing/retry/dlq/delay/completed/failed/expired/history）
 - 搜索 task_id、action、payload
+- 按创建时间和完成时间筛选任务
 - 任务详情和原始 JSON
 - 单任务重试、删除
-- 批量 drain retry、重放 DLQ
+- 批量 drain retry、重放 DLQ、放回过期任务
 - 安全恢复 stale processing
-- 投递测试任务，支持 delay
+- 投递测试任务，支持 delay 和 expire_seconds
+- 删除队列及关联历史记录
 
 ## 多级流水线模式
 
@@ -435,3 +454,4 @@ pipe.execute()
 5. **retry 队列用 `rpush`**（FIFO），主队列用 `lpush`（LIFO）。retry 移动回主队列时保持顺序
 6. **heartbeat TTL**：Worker 崩溃后需等 heartbeat 过期，`recover()` 才会处理
 7. **大 payload**：超过 50KB 自动走 RemoteStorage 客户端；服务端需安装 `qtask_list[storage]` 并启动 `qtask storage`
+8. **expired 与历史 TTL 不同**：`expire_seconds` 控制业务任务是否进入 expired 视图；`clean-history` 清理的是历史记录 TTL，不会代替过期任务放回

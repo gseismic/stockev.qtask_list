@@ -209,12 +209,23 @@ admin = QueueAdmin("redis://localhost:6379/0")
 queues = admin.list_queues()
 tasks = admin.list_tasks("stockev:day-kline:fetch", state="dlq", limit=50)
 history = admin.list_tasks("stockev:day-kline:fetch", state=QueueState.history, limit=50)
+completed = admin.list_tasks("stockev:day-kline:fetch", state=QueueState.completed, limit=50)
+failed = admin.list_tasks("stockev:day-kline:fetch", state=QueueState.failed, limit=50)
+expired = admin.list_tasks("stockev:day-kline:fetch", state=QueueState.expired, limit=50)
+recent_done = admin.list_tasks(
+    "stockev:day-kline:fetch",
+    state=QueueState.completed,
+    completed_after=1717200000,
+)
 detail = admin.get_task("<task_id>")
 
 # 手动控制
 admin.push_task("stockev:day-kline:fetch", {"action": "test"})
+admin.push_task("stockev:day-kline:fetch", {"action": "test"}, expire_seconds=3600)
 admin.requeue_task("stockev:day-kline:fetch", "<task_id>", from_state="dlq")
 admin.requeue_dlq("stockev:day-kline:fetch")
+admin.list_expired("stockev:day-kline:fetch", limit=100)
+admin.requeue_expired("stockev:day-kline:fetch")
 admin.move_retry("stockev:day-kline:fetch")
 admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
 
@@ -222,8 +233,13 @@ admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
 admin.clear_queue("stockev:day-kline:fetch", include_history=True)
 admin.clean_history("stockev:day-kline:fetch", ttl_days=15)
 admin.delete_task("<task_id>", queue_name="stockev:day-kline:fetch")
+admin.delete_queue("stockev:day-kline:fetch")  # 删除整条队列及历史，谨慎使用
 admin.diagnose("stockev:day-kline:fetch")
 ```
+
+`QueueState` 用户可见状态：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `expired`, `all`。
+
+`expired` 表示业务任务过期：投递时通过 `expire_seconds` 写入 `expires_at`，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
 
 ### TaskHistory — 任务历史
 
@@ -405,13 +421,15 @@ qtask dashboard
 
 Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localhost:8765`。页面支持：
 
-- 按队列查看 ready/processing/retry/dlq/delay/history。
+- 按队列查看 ready/processing/retry/dlq/delay/completed/failed/expired/history。
 - 搜索 task_id、action、payload。
+- 按创建时间和完成时间筛选任务。
 - 查看任务详情和原始 JSON。
 - 单任务重试、删除。
-- 批量 drain retry、重放 DLQ。
+- 批量 drain retry、重放 DLQ、放回过期任务。
 - 安全恢复 stale processing；强制恢复 active processing 需要显式确认。
-- 投递测试任务，支持 delay。
+- 投递测试任务，支持 delay 和 expire_seconds。
+- 删除队列及关联历史记录。
 
 远程查看时应启用登录，并显式监听远程地址：
 
