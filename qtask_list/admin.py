@@ -213,22 +213,16 @@ class QueueAdmin:
         elif selected_state in (QueueState.completed, QueueState.failed):
             # 按 status 过滤 history
             status = selected_state.value
-            history_rows = self._read_history_by_status(queue_name, limit, status)
-            history_rows = self._apply_time_filters(
-                history_rows,
-                created_after,
-                created_before,
-                completed_after,
-                completed_before,
+            return self._read_history_by_status(
+                queue_name,
+                limit,
+                status,
+                search=search,
+                created_after=created_after,
+                created_before=created_before,
+                completed_after=completed_after,
+                completed_before=completed_before,
             )
-            if search:
-                needle = search.lower()
-                history_rows = [
-                    r
-                    for r in history_rows
-                    if needle in json.dumps(r, ensure_ascii=False, default=str).lower()
-                ]
-            return history_rows[:limit]
         elif selected_state == QueueState.expired:
             read_limit = max(limit * 3, limit)
             expired_rows = self._read_expired(
@@ -652,10 +646,7 @@ class QueueAdmin:
         hist_key = f"qtask:hist:{queue_name}"
         task_ids = self.r.zrevrange(hist_key, 0, limit - 1)
         rows = []
-        for task_id in task_ids:
-            data = self.get_task(task_id)
-            if not data:
-                continue
+        for data in self._read_history_records(task_ids):
             data["_queue"] = queue_name
             data["_state"] = QueueState.history.value
             data["_source"] = hist_key
@@ -663,25 +654,120 @@ class QueueAdmin:
         return rows
 
     def _read_history_by_status(
-        self, queue_name: str, limit: int, status: str
+        self,
+        queue_name: str,
+        limit: int,
+        status: str,
+        search: Optional[str] = None,
+        created_after: Optional[float] = None,
+        created_before: Optional[float] = None,
+        completed_after: Optional[float] = None,
+        completed_before: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+
         hist_key = f"qtask:hist:{queue_name}"
-        scan_limit = max(limit * 3, 300)
-        task_ids = self.r.zrevrange(hist_key, 0, scan_limit - 1)
-        rows = []
-        for task_id in task_ids:
-            data = self.get_task(task_id)
-            if not data:
-                continue
-            if data.get("status") != status:
-                continue
-            data["_queue"] = queue_name
-            data["_state"] = status
-            data["_source"] = hist_key
-            rows.append(data)
-            if len(rows) >= limit:
+        max_scan = min(max(limit * 20, 1000), 10000)
+        batch_size = min(max(limit * 3, 100), 500)
+        rows: List[Dict[str, Any]] = []
+        scanned = 0
+        needle = search.lower() if search else None
+
+        while scanned < max_scan and len(rows) < limit:
+            end = min(scanned + batch_size, max_scan) - 1
+            task_ids = self.r.zrevrange(hist_key, scanned, end)
+            if not task_ids:
                 break
-        return rows
+
+            for data in self._read_history_records(task_ids):
+                if data.get("status") != status:
+                    continue
+                data["_queue"] = queue_name
+                data["_state"] = status
+                data["_source"] = hist_key
+                if not self._matches_time_filters(
+                    data,
+                    created_after,
+                    created_before,
+                    completed_after,
+                    completed_before,
+                ):
+                    continue
+                if needle and needle not in json.dumps(data, ensure_ascii=False, default=str).lower():
+                    continue
+                rows.append(data)
+                if len(rows) >= limit:
+                    break
+
+            scanned += len(task_ids)
+
+        return rows[:limit]
+
+    @staticmethod
+    def _matches_time_filters(
+        row: Dict[str, Any],
+        created_after: Optional[float] = None,
+        created_before: Optional[float] = None,
+        completed_after: Optional[float] = None,
+        completed_before: Optional[float] = None,
+    ) -> bool:
+        if created_after is not None and not (
+            row.get("created_at") and float(row["created_at"]) >= created_after
+        ):
+            return False
+        if created_before is not None and not (
+            row.get("created_at") and float(row["created_at"]) <= created_before
+        ):
+            return False
+        if completed_after is not None and not (
+            row.get("updated_at") and float(row["updated_at"]) >= completed_after
+        ):
+            return False
+        if completed_before is not None and not (
+            row.get("updated_at") and float(row["updated_at"]) <= completed_before
+        ):
+            return False
+        return True
+
+    def _read_history_records(self, task_ids: List[str]) -> List[Dict[str, Any]]:
+        if not task_ids:
+            return []
+
+        pipe = self.r.pipeline()
+        for task_id in task_ids:
+            pipe.type(f"qtask:task:{task_id}")
+        redis_types = pipe.execute()
+
+        pipe = self.r.pipeline()
+        for task_id, redis_type in zip(task_ids, redis_types):
+            key = f"qtask:task:{task_id}"
+            if redis_type == "hash":
+                pipe.hgetall(key)
+            else:
+                pipe.get(key)
+        raw_records = pipe.execute()
+
+        records: List[Dict[str, Any]] = []
+        for task_id, raw_record in zip(task_ids, raw_records):
+            record = self._parse_history_record(task_id, raw_record)
+            if record:
+                records.append(record)
+        return records
+
+    def _parse_history_record(self, task_id: str, raw_record: Any) -> Optional[Dict[str, Any]]:
+        if not raw_record:
+            return None
+        if isinstance(raw_record, dict):
+            return {
+                field: self._parse_json(value)
+                for field, value in raw_record.items()
+            }
+
+        parsed = self._parse_json(raw_record)
+        if isinstance(parsed, dict):
+            return cast(Dict[str, Any], parsed)
+        return {"task_id": task_id, "_raw": raw_record}
 
     def _read_expired(
         self,

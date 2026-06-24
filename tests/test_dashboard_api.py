@@ -513,6 +513,86 @@ def test_dashboard_list_completed_tasks(client, r):
     r.delete(f"qtask:hist:{queue}")
 
 
+def test_dashboard_completed_tasks_scan_beyond_recent_pending(client, r):
+    """completed 视图不应被最近 pending 任务遮挡。"""
+    queue = "qtask_dash_test:completed:sparse"
+    now = time.time()
+    completed_id = "sparse-completed"
+    r.hset(
+        f"qtask:task:{completed_id}",
+        mapping={
+            "task_id": completed_id,
+            "status": "completed",
+            "action": "done_action",
+            "created_at": str(now - 1000),
+            "updated_at": str(now - 900),
+        },
+    )
+    r.zadd(f"qtask:hist:{queue}", {completed_id: now - 900})
+
+    pipe = r.pipeline()
+    for index in range(320):
+        task_id = f"sparse-pending-{index:03d}"
+        pipe.hset(
+            f"qtask:task:{task_id}",
+            mapping={
+                "task_id": task_id,
+                "status": "pending",
+                "action": "pending_action",
+                "created_at": str(now - index),
+            },
+        )
+        pipe.zadd(f"qtask:hist:{queue}", {task_id: now - index})
+    pipe.execute()
+
+    response = client.get(f"/api/queue/{queue}/tasks", params={"state": "completed", "limit": 1})
+
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["task_id"] == completed_id
+
+
+def test_dashboard_completed_time_filter_scans_beyond_recent_completed(client, r):
+    """completed 时间筛选不应先被较新的 completed 截断。"""
+    queue = "qtask_dash_test:completed:time-sparse"
+    now = time.time()
+    target_id = "time-sparse-completed"
+    r.hset(
+        f"qtask:task:{target_id}",
+        mapping={
+            "task_id": target_id,
+            "status": "completed",
+            "action": "target_action",
+            "created_at": str(now - 1000),
+            "updated_at": str(now - 900),
+        },
+    )
+    r.zadd(f"qtask:hist:{queue}", {target_id: now - 900})
+
+    pipe = r.pipeline()
+    for index in range(320):
+        task_id = f"time-sparse-recent-{index:03d}"
+        pipe.hset(
+            f"qtask:task:{task_id}",
+            mapping={
+                "task_id": task_id,
+                "status": "completed",
+                "action": "recent_action",
+                "created_at": str(now - index),
+                "updated_at": str(now - index),
+            },
+        )
+        pipe.zadd(f"qtask:hist:{queue}", {task_id: now - index})
+    pipe.execute()
+
+    response = client.get(
+        f"/api/queue/{queue}/tasks",
+        params={"state": "completed", "limit": 1, "created_before": now - 900},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["task_id"] == target_id
+
+
 def test_dashboard_time_filter(client, r):
     """时间范围筛选任务。"""
     queue = "qtask_dash_test:timefilter"
