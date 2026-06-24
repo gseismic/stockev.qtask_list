@@ -84,6 +84,29 @@ class TestCLI:
         assert "fetch" in peek_result.stdout
         assert "AAPL" in peek_result.stdout
 
+    def test_push_with_namespace_uses_admin_queue_name(self, runner, r):
+        result = runner.invoke(
+            app,
+            ["push", "push_ns", '{"action":"fetch"}', "-n", "testns", "--json"],
+        )
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output["queue"] == "testns:push_ns"
+        assert r.llen("testns:push_ns") == 1
+
+    def test_peek_processing_reads_worker_specific_key(self, runner, r):
+        queue = "stockev_list:processing_peek"
+        r.lpush(f"{queue}:processing:worker-1", make_msg("proc-1", {"action": "work"}))
+
+        result = runner.invoke(app, ["peek", queue, "--state", "processing", "--json"])
+
+        assert result.exit_code == 0
+        output = json.loads(result.stdout)
+        assert output[0]["task_id"] == "proc-1"
+        assert output[0]["state"] == "processing"
+        assert output[0]["source"] == f"{queue}:processing:worker-1"
+
     def test_clear_queue_can_include_history(self, runner, r):
         push_result = runner.invoke(
             app,
@@ -102,15 +125,31 @@ class TestCLI:
         assert r.exists("stockev_list:clear_test") == 0
         assert r.exists("qtask:hist:stockev_list:clear_test") == 0
 
+    def test_clear_queue_can_preserve_dlq(self, runner, r):
+        queue = "stockev_list:clear_keep_dlq"
+        r.lpush(queue, make_msg("ready-1"))
+        r.lpush(f"{queue}:dlq", make_msg("dlq-1"))
+
+        result = runner.invoke(app, ["clear", queue, "--no-dlq", "--force"])
+
+        assert result.exit_code == 0
+        assert r.exists(queue) == 0
+        assert message_ids(r, f"{queue}:dlq") == ["dlq-1"]
+
     def test_requeue_moves_dlq_to_ready(self, runner, r):
         r.lpush("stockev_list:dlq_test:dlq", make_msg("dlq-1"))
         r.lpush("stockev_list:dlq_test:dlq", make_msg("dlq-2"))
+        r.hset("qtask:task:dlq-1", mapping={"task_id": "dlq-1", "status": "failed"})
+        r.hset("qtask:task:dlq-2", mapping={"task_id": "dlq-2", "status": "failed"})
+        r.zadd("qtask:hist:stockev_list:dlq_test", {"dlq-1": 1, "dlq-2": 2})
 
         result = runner.invoke(app, ["requeue", "stockev_list:dlq_test", "--force"])
 
         assert result.exit_code == 0
         assert r.llen("stockev_list:dlq_test:dlq") == 0
         assert r.llen("stockev_list:dlq_test") == 2
+        assert r.hget("qtask:task:dlq-1", "status") == "pending"
+        assert r.hget("qtask:task:dlq-2", "status") == "pending"
 
     def test_requeue_single_task_from_dlq(self, runner, r):
         r.lpush("stockev_list:single_dlq:dlq", make_msg("dlq-keep"))
@@ -129,12 +168,15 @@ class TestCLI:
 
     def test_retry_moves_retry_to_ready(self, runner, r):
         r.lpush("stockev_list:retry_test:retry", make_msg("retry-1"))
+        r.hset("qtask:task:retry-1", mapping={"task_id": "retry-1", "status": "failed"})
+        r.zadd("qtask:hist:stockev_list:retry_test", {"retry-1": 1})
 
         result = runner.invoke(app, ["retry", "stockev_list:retry_test"])
 
         assert result.exit_code == 0
         assert r.llen("stockev_list:retry_test:retry") == 0
         assert r.llen("stockev_list:retry_test") == 1
+        assert r.hget("qtask:task:retry-1", "status") == "pending"
 
     def test_recover_skips_active_worker_processing_by_default(self, runner, r):
         queue = "stockev_list:proc_test"
@@ -165,6 +207,23 @@ class TestCLI:
 
         assert result.exit_code == 0
         assert "abc123" in result.stdout
+
+    def test_history_lists_queue_history_via_admin(self, runner, r):
+        r.hset(
+            "qtask:task:hist-list-1",
+            mapping={
+                "task_id": "hist-list-1",
+                "action": "listed_action",
+                "status": "completed",
+                "created_at": 1,
+            },
+        )
+        r.zadd("qtask:hist:stockev_list:hist_list", {"hist-list-1": 1})
+
+        result = runner.invoke(app, ["history", "stockev_list:hist_list"])
+
+        assert result.exit_code == 0
+        assert "listed_action" in result.stdout
 
     def test_task_get_and_delete(self, runner, r):
         push_result = runner.invoke(
@@ -258,3 +317,64 @@ class TestCLICleanHistory:
 
         result = runner.invoke(app, ["clean-history", "stockev_list:clean_test"])
         assert result.exit_code == 0
+        assert r.exists("qtask:task:clean1") == 0
+        assert r.zcard("qtask:hist:stockev_list:clean_test") == 0
+
+    def test_clean_history_all_queues(self, runner, r):
+        r.set("qtask:task:clean-all-1", '{"task_id":"clean-all-1","action":"test"}')
+        r.set("qtask:task:clean-all-2", '{"task_id":"clean-all-2","action":"test"}')
+        r.zadd("qtask:hist:stockev_list:clean_all_a", {"clean-all-1": 1})
+        r.zadd("qtask:hist:testns:clean_all_b", {"clean-all-2": 1})
+
+        result = runner.invoke(app, ["clean-history"])
+
+        assert result.exit_code == 0
+        assert r.exists("qtask:task:clean-all-1") == 0
+        assert r.exists("qtask:task:clean-all-2") == 0
+        assert r.zcard("qtask:hist:stockev_list:clean_all_a") == 0
+        assert r.zcard("qtask:hist:testns:clean_all_b") == 0
+
+
+class TestCLIStorage:
+    def test_storage_passes_runtime_config(self, runner, tmp_path, monkeypatch):
+        import uvicorn
+        from remote_storage import server as storage_server
+
+        calls = {}
+        monkeypatch.setattr(storage_server, "DATA_DIR", tmp_path / "before")
+        monkeypatch.setattr(storage_server, "_ttl_seconds", 123.0)
+        monkeypatch.setattr(
+            storage_server,
+            "_start_cleanup_thread",
+            lambda: calls.setdefault("cleanup_started", True),
+        )
+
+        def fake_run(app, host, port):
+            calls.update({"app": app, "host": host, "port": port})
+
+        monkeypatch.setattr(uvicorn, "run", fake_run)
+
+        result = runner.invoke(
+            app,
+            [
+                "storage",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9010",
+                "--data-dir",
+                str(tmp_path),
+                "--ttl-days",
+                "0",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert storage_server.DATA_DIR == tmp_path
+        assert storage_server._ttl_seconds == 0
+        assert calls == {
+            "cleanup_started": True,
+            "app": storage_server.app,
+            "host": "127.0.0.1",
+            "port": 9010,
+        }

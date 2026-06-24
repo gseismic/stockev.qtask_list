@@ -299,7 +299,7 @@ def test_dashboard_resolves_compressed_payload(client, r):
     msg = json.dumps({"task_id": "comp-1", "payload": json.dumps(payload)})
     r.lpush(queue, msg)
 
-    response = client.get(f"/api/task/comp-1/payload", params={"queue": queue, "state": "ready"})
+    response = client.get("/api/task/comp-1/payload", params={"queue": queue, "state": "ready"})
     assert response.status_code == 200
     result = response.json()
     assert result["action"] == "scrape_day_kline"
@@ -316,7 +316,7 @@ def test_dashboard_payload_endpoint_for_large_without_storage(client, r):
     })
     r.zadd(f"qtask:hist:{queue}", {"large-ns-1": 1})
 
-    response = client.get(f"/api/task/large-ns-1/payload", params={"queue": queue, "state": "ready"})
+    response = client.get("/api/task/large-ns-1/payload", params={"queue": queue, "state": "ready"})
     assert response.status_code == 200
     result = response.json()
     assert result["action"] == "scrape_fin_sheet"

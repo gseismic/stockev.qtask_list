@@ -26,6 +26,11 @@ dashboard = [
     "uvicorn>=0.27.0",
     "requests>=2.31.0",
 ]
+storage = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "python-multipart>=0.0.9",
+]
 
 [project.scripts]
 qtask = "cli.__main__:app"
@@ -52,3 +57,17 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "iosql",
+    "stockev.qtask_list",
+]

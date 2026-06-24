@@ -20,9 +20,10 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from loguru import logger
 
 app = FastAPI(title="qtask RemoteStorage")
@@ -42,6 +43,17 @@ def _generate_key(data: bytes) -> str:
 
 _ttl_seconds: float = float(os.environ.get("QTASK_STORAGE_TTL", 7 * 86400))
 _cleanup_interval: float = 3600
+
+
+def configure(data_dir: str | Path | None = None, ttl_days: float | None = None) -> None:
+    """配置服务端运行目录和 TTL。"""
+    global DATA_DIR, _ttl_seconds
+
+    if data_dir is not None:
+        DATA_DIR = Path(data_dir)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if ttl_days is not None:
+        _ttl_seconds = ttl_days * 86400 if ttl_days > 0 else 0
 
 
 def _cleanup_expired():
@@ -77,9 +89,7 @@ def _start_cleanup_thread():
 
 
 @app.post("/api/storage/upload")
-async def upload(request: Request):
-    form = await request.form()
-    file = form.get("file")
+async def upload(file: Annotated[UploadFile | None, File()] = None):
     if file is None:
         raise HTTPException(400, "missing 'file' field")
 
@@ -138,9 +148,7 @@ if __name__ == "__main__":
     p.add_argument("--ttl-days", type=float, default=7.0, help="文件保留天数，0=永不过期")
     args = p.parse_args()
 
-    DATA_DIR = Path(args.data_dir)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _ttl_seconds = args.ttl_days * 86400 if args.ttl_days > 0 else 0
+    configure(args.data_dir, args.ttl_days)
 
     logger.info(f"RemoteStorage 启动: data_dir={DATA_DIR}, ttl={args.ttl_days}天, port={args.port}")
     _start_cleanup_thread()

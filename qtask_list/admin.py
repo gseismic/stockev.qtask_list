@@ -213,19 +213,33 @@ class QueueAdmin:
         elif selected_state in (QueueState.completed, QueueState.failed):
             # 按 status 过滤 history
             status = selected_state.value
-            rows = self._read_history_by_status(queue_name, limit, status)
-            rows = self._apply_time_filters(rows, created_after, created_before, completed_after, completed_before)
+            history_rows = self._read_history_by_status(queue_name, limit, status)
+            history_rows = self._apply_time_filters(
+                history_rows,
+                created_after,
+                created_before,
+                completed_after,
+                completed_before,
+            )
             if search:
                 needle = search.lower()
-                rows = [r for r in rows if needle in json.dumps(r, ensure_ascii=False, default=str).lower()]
-            return rows[:limit]
+                history_rows = [
+                    r
+                    for r in history_rows
+                    if needle in json.dumps(r, ensure_ascii=False, default=str).lower()
+                ]
+            return history_rows[:limit]
         elif selected_state == QueueState.expired:
-            rows = self._read_expired(queue_name, limit * 3)
-            rows = self._apply_time_filters(rows, created_after, created_before)
+            expired_rows = self._read_expired(queue_name, limit * 3)
+            expired_rows = self._apply_time_filters(expired_rows, created_after, created_before)
             if search:
                 needle = search.lower()
-                rows = [r for r in rows if needle in json.dumps(r, ensure_ascii=False, default=str).lower()]
-            return rows[:limit]
+                expired_rows = [
+                    r
+                    for r in expired_rows
+                    if needle in json.dumps(r, ensure_ascii=False, default=str).lower()
+                ]
+            return expired_rows[:limit]
         else:
             states = [selected_state]
 
@@ -329,11 +343,11 @@ class QueueAdmin:
             if state == QueueState.delay:
                 for raw_msg, _score in self.r.zscan_iter(key):
                     if self._message_task_id(raw_msg) == task_id:
-                        return raw_msg
+                        return cast(str, raw_msg)
             else:
                 for raw_msg in self.r.lrange(key, 0, -1):
                     if self._message_task_id(raw_msg) == task_id:
-                        return raw_msg
+                        return cast(str, raw_msg)
         return None
 
     def _resolve_payload_from_msg(self, raw_msg: str, task_id: str) -> Dict[str, Any]:
@@ -577,6 +591,25 @@ class QueueAdmin:
 
         return {"deleted_keys": deleted_keys, "history_records": history_records}
 
+    def clean_history(
+        self,
+        queue_name: Optional[str] = None,
+        ttl_days: int = 15,
+    ) -> Dict[str, Any]:
+        queues = [queue_name] if queue_name else self.queue_names()
+        ttl_seconds = ttl_days * 86400
+        per_queue: Dict[str, int] = {}
+        total = 0
+
+        for queue in queues:
+            if not queue:
+                continue
+            count = self._smart_queue(queue).history.clean_expired(ttl_seconds=ttl_seconds)
+            per_queue[queue] = count
+            total += count
+
+        return {"cleaned": total, "queues": per_queue}
+
     # ==================== Internal Helpers ====================
 
     def _read_state(
@@ -631,7 +664,6 @@ class QueueAdmin:
         scan_limit = max(limit * 3, 300)
         task_ids = self.r.zrevrange(hist_key, 0, scan_limit - 1)
         rows = []
-        now = time.time()
         for task_id in task_ids:
             data = self.get_task(task_id)
             if not data:
@@ -699,7 +731,8 @@ class QueueAdmin:
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
                 payload = {}
-        action = data.get("action", payload.get("action", "") if isinstance(payload, dict) else "")
+        if isinstance(payload, dict) and data.get("action") and not payload.get("action"):
+            payload["action"] = data["action"]
         msg = json.dumps({
             "task_id": task_id,
             "payload": payload if isinstance(payload, str) else json.dumps(payload),

@@ -19,6 +19,7 @@ qtask_list 是基于 Redis List 的分布式任务队列，核心机制为 `BRPO
 pip install -e .                  # 基础安装
 pip install -e ".[dev]"           # 开发依赖 (pytest, ruff, mypy)
 pip install -e ".[dashboard]"     # Dashboard (fastapi, uvicorn)
+pip install -e ".[storage]"       # RemoteStorage 服务端 (fastapi, uvicorn, python-multipart)
 ```
 
 安装后可用 `qtask` 或 `qtask_list` 命令。
@@ -125,6 +126,7 @@ admin.list_workers("stockev:fetch")  # Worker 信息列表
 
 # 读取任务
 admin.list_tasks("stockev:fetch", state=QueueState.dlq, limit=50)
+admin.list_tasks("stockev:fetch", state=QueueState.history, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.all, search="AAPL")
 admin.get_task("<task_id>")
 
@@ -143,6 +145,8 @@ admin.delete_task("<task_id>")
 admin.delete_task("<task_id>", queue_name="stockev:fetch")
 admin.clear_queue("stockev:fetch")
 admin.clear_queue("stockev:fetch", include_history=True)  # 连带历史
+admin.clean_history("stockev:fetch", ttl_days=15)
+admin.clean_history(ttl_days=15)  # 全部队列
 ```
 
 **QueueState 枚举**：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `all`
@@ -233,12 +237,16 @@ qtask task delete <task_id> --queue stockev:fetch --force
 
 # 清理过期历史
 qtask clean-history stockev:fetch -t 15
+qtask clean-history
 
 # 归档到 SQLite
 qtask archive stockev:fetch -d 1
 
 # 内存监控
 qtask monitor
+
+# 启动 RemoteStorage 服务端（大 payload 外存）
+qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
 
 # 启动 Worker（加载用户模块中已注册 handler 的 worker 实例）
 qtask worker --module myapp.workers:worker
@@ -365,6 +373,8 @@ qtask_list/
 │   ├── main.py           # FastAPI
 │   ├── templates/        # Jinja2
 │   └── static/           # CSS/JS
+├── remote_storage/       # RemoteStorage 服务端
+│   └── server.py
 ├── examples/
 │   ├── generator.py
 │   ├── stockev/          # fetch_worker.py, store_worker.py
@@ -424,4 +434,4 @@ pipe.execute()
 4. **`clear` 不含 history**：默认清队列不删历史，删历史需显式 `--include-history`
 5. **retry 队列用 `rpush`**（FIFO），主队列用 `lpush`（LIFO）。retry 移动回主队列时保持顺序
 6. **heartbeat TTL**：Worker 崩溃后需等 heartbeat 过期，`recover()` 才会处理
-7. **大 payload**：超过 50KB 自动走 RemoteStorage，弱依赖外部 HTTP 服务
+7. **大 payload**：超过 50KB 自动走 RemoteStorage 客户端；服务端需安装 `qtask_list[storage]` 并启动 `qtask storage`

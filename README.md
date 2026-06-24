@@ -20,6 +20,7 @@
 pip install -e .                  # 基础安装
 pip install -e ".[dev]"           # 开发依赖 (pytest, ruff, mypy)
 pip install -e ".[dashboard]"     # Dashboard 支持 (fastapi, uvicorn)
+pip install -e ".[storage]"       # RemoteStorage 服务端支持
 ```
 
 ## 架构概览
@@ -200,22 +201,26 @@ worker.run()
 `QueueAdmin` 是给 Dashboard、CLI、Agent 和运维脚本复用的任务生命周期控制接口。它使用用户能理解的状态和动作，不要求调用方直接拼 Redis Key。
 
 ```python
-from qtask_list import QueueAdmin
+from qtask_list import QueueAdmin, QueueState
 
 admin = QueueAdmin("redis://localhost:6379/0")
 
 # 查看队列和任务
 queues = admin.list_queues()
 tasks = admin.list_tasks("stockev:day-kline:fetch", state="dlq", limit=50)
+history = admin.list_tasks("stockev:day-kline:fetch", state=QueueState.history, limit=50)
 detail = admin.get_task("<task_id>")
 
 # 手动控制
+admin.push_task("stockev:day-kline:fetch", {"action": "test"})
 admin.requeue_task("stockev:day-kline:fetch", "<task_id>", from_state="dlq")
 admin.requeue_dlq("stockev:day-kline:fetch")
 admin.move_retry("stockev:day-kline:fetch")
 admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
 
-# 删除和诊断
+# 清理、删除和诊断
+admin.clear_queue("stockev:day-kline:fetch", include_history=True)
+admin.clean_history("stockev:day-kline:fetch", ttl_days=15)
 admin.delete_task("<task_id>", queue_name="stockev:day-kline:fetch")
 admin.diagnose("stockev:day-kline:fetch")
 ```
@@ -246,7 +251,17 @@ pop: 检测到 _large=true
   → load(key) → GET /api/storage/download/{key} → 还原完整 payload
 ```
 
-这是一个 HTTP 客户端，需外部存储服务配合。
+这是一个 HTTP 客户端，需外部存储服务配合。项目内置了一个轻量服务端，可通过 CLI 启动：
+
+```bash
+qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
+```
+
+服务端依赖安装：
+
+```bash
+pip install -e ".[storage]"
+```
 
 ### ArchiveManager + Monitor — 归档与监控
 
@@ -373,12 +388,16 @@ qtask worker --module myapp.workers:worker
 
 # 清理过期历史
 qtask clean-history stockev_list:fetch -t 15
+qtask clean-history
 
 # 归档到 SQLite
 qtask archive stockev_list:fetch -d 1
 
 # Redis 内存监控
 qtask monitor
+
+# 启动 RemoteStorage 服务端（大 payload 外存）
+qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
 
 # 启动 Web Dashboard
 qtask dashboard

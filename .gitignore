@@ -51,6 +51,10 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Local workspace symlinks
+/iosql
+/stockev.qtask_list
+
 # Translations
 *.mo
 *.pot
