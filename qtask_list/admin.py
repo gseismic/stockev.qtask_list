@@ -230,7 +230,12 @@ class QueueAdmin:
                 ]
             return history_rows[:limit]
         elif selected_state == QueueState.expired:
-            expired_rows = self._read_expired(queue_name, limit * 3)
+            read_limit = max(limit * 3, limit)
+            expired_rows = self._read_expired(
+                queue_name,
+                limit=read_limit,
+                scan_limit=max(read_limit, 300),
+            )
             expired_rows = self._apply_time_filters(expired_rows, created_after, created_before)
             if search:
                 needle = search.lower()
@@ -678,9 +683,19 @@ class QueueAdmin:
                 break
         return rows
 
-    def _read_expired(self, queue_name: str, scan_limit: int = 200) -> List[Dict[str, Any]]:
+    def _read_expired(
+        self,
+        queue_name: str,
+        limit: int = 50,
+        scan_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        if limit <= 0:
+            return []
+
         hist_key = f"qtask:hist:{queue_name}"
-        task_ids = self.r.zrevrange(hist_key, 0, min(scan_limit, 2000) - 1)
+        effective_scan_limit = scan_limit if scan_limit is not None else max(limit * 3, 300)
+        effective_scan_limit = min(max(effective_scan_limit, limit), 2000)
+        task_ids = self.r.zrevrange(hist_key, 0, effective_scan_limit - 1)
         expired = []
         now = time.time()
         for task_id in task_ids:
@@ -698,20 +713,31 @@ class QueueAdmin:
                 data["_state"] = QueueState.expired.value
                 data["_source"] = hist_key
                 expired.append(data)
-            if len(expired) >= 50:
+            if len(expired) >= limit:
                 break
         return expired
 
     def list_expired(self, queue_name: str, limit: int = 50) -> List[Dict[str, Any]]:
-        return self._read_expired(queue_name, scan_limit=max(limit * 3, 300))
+        return self._read_expired(
+            queue_name,
+            limit=limit,
+            scan_limit=max(limit * 3, 300),
+        )
 
     def requeue_expired(
-        self, queue_name: str, task_id: Optional[str] = None
+        self,
+        queue_name: str,
+        task_id: Optional[str] = None,
+        limit: int = 500,
     ) -> Dict[str, int]:
         if task_id:
             return self._requeue_single_expired(queue_name, task_id)
 
-        expired = self._read_expired(queue_name, scan_limit=500)
+        expired = self._read_expired(
+            queue_name,
+            limit=limit,
+            scan_limit=max(limit * 3, 500),
+        )
         moved = 0
         for task in expired:
             tid = task.get("task_id")
@@ -738,7 +764,7 @@ class QueueAdmin:
             "payload": payload if isinstance(payload, str) else json.dumps(payload),
         })
         self.r.lpush(queue_name, msg)
-        self._update_history(task_id, {"status": "pending"})
+        self._update_history(task_id, {"status": "pending", "expires_at": ""})
         return {"moved": 1, "task_id": task_id, "queue": queue_name}
 
     def _decode_message(

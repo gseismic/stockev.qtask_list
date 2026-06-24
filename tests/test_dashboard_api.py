@@ -49,6 +49,28 @@ def make_msg(task_id: str, payload: dict | None = None) -> str:
     return json.dumps({"task_id": task_id, "payload": json.dumps(payload or {})})
 
 
+def seed_expired_tasks(client, queue: str, count: int, prefix: str, status: str = "pending") -> list[str]:
+    now = time.time()
+    task_ids = []
+    pipe = client.pipeline()
+    for index in range(count):
+        task_id = f"{prefix}-{index:03d}"
+        task_ids.append(task_id)
+        pipe.hset(
+            f"qtask:task:{task_id}",
+            mapping={
+                "task_id": task_id,
+                "status": status,
+                "action": "expired_action",
+                "expires_at": str(now - 10),
+                "payload": json.dumps({"action": "expired_action", "index": index}),
+            },
+        )
+        pipe.zadd(f"qtask:hist:{queue}", {task_id: now - index})
+    pipe.execute()
+    return task_ids
+
+
 def message_ids(client, key: str) -> list[str]:
     return [json.loads(raw)["task_id"] for raw in client.lrange(key, 0, -1)]
 
@@ -372,6 +394,28 @@ def test_dashboard_list_expired(client, r):
     r.delete(f"qtask:hist:{queue}")
 
 
+def test_dashboard_list_expired_respects_limit_above_fifty(client, r):
+    """过期任务列表应尊重 API limit，而不是固定截断到 50 条。"""
+    queue = "qtask_dash_test:expired:limit"
+    seed_expired_tasks(r, queue, 60, "exp-limit")
+
+    response = client.get(f"/api/queue/{queue}/expired", params={"limit": 60})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["count"] == 60
+    assert len(result["tasks"]) == 60
+
+    state_response = client.get(
+        f"/api/queue/{queue}/tasks",
+        params={"state": "expired", "limit": 60},
+    )
+    assert state_response.status_code == 200
+    state_result = state_response.json()
+    assert state_result["count"] == 60
+    assert len(state_result["tasks"]) == 60
+
+
 def test_dashboard_requeue_expired(client, r):
     """放回过期任务。"""
     import time
@@ -400,6 +444,24 @@ def test_dashboard_requeue_expired(client, r):
     r.delete(queue)
     r.delete(f"qtask:task:{task_id}")
     r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_requeue_expired_bulk_handles_more_than_fifty(client, r):
+    """批量放回过期任务不应被内部 50 条常量截断。"""
+    queue = "qtask_dash_test:expired:bulk-requeue"
+    task_ids = seed_expired_tasks(r, queue, 60, "exp-bulk", status="expired")
+
+    response = client.post(f"/api/queue/{queue}/requeue-expired", json={"task_id": None})
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == 60
+    assert r.llen(queue) == 60
+    assert all(r.hget(f"qtask:task:{task_id}", "status") == "pending" for task_id in task_ids)
+
+    expired_again = client.get(f"/api/queue/{queue}/expired", params={"limit": 60})
+    assert expired_again.status_code == 200
+    assert expired_again.json()["count"] == 0
+    assert all(r.hget(f"qtask:task:{task_id}", "expires_at") == "" for task_id in task_ids)
 
 
 def test_dashboard_queue_stats_includes_expired(client, r):
