@@ -340,6 +340,7 @@ def recover(
     result = admin_from_url(redis_url).recover(queue_name, include_active=force_active)
     count = result["recovered"]
     skipped = result["skipped_active"]
+    skipped_legacy = result.get("skipped_legacy", 0)
 
     if force_active:
         console.print(f"[green]Recovered {count} tasks from all processing queues[/green]")
@@ -348,6 +349,11 @@ def recover(
     console.print(f"[green]Recovered {count} tasks from stale processing queues[/green]")
     if skipped:
         console.print(f"[yellow]Skipped {skipped} active processing tasks[/yellow]")
+    if skipped_legacy:
+        console.print(
+            "[yellow]Skipped legacy processing tasks; use --force-active only after "
+            "confirming no direct SmartQueue consumer is still working[/yellow]"
+        )
 
 
 @app.command()

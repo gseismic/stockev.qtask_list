@@ -5,7 +5,7 @@ from .admin import QueueAdmin, QueueState
 
 __all__ = ["SmartQueue", "Worker", "RemoteStorage", "QueueAdmin", "QueueState", "start_dashboard"]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def start_dashboard(

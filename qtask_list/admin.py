@@ -55,16 +55,21 @@ class QueueAdmin:
             if self._is_state_key(key) or ":hist:" in key or ":task:" in key:
                 continue
             try:
-                if self.r.type(key) == "list":
+                if self.r.type(key) == "list" and self._list_contains_qtask_message(key):
                     queues.add(key)
             except redis.RedisError:
                 continue
 
-        for suffix in [":retry", ":dlq", ":delay", ":processing"]:
+        for suffix in [":retry", ":dlq", ":processing"]:
             for key in self.r.scan_iter(f"*{suffix}"):
-                queues.add(key[: -len(suffix)])
+                if self._list_contains_qtask_message(key):
+                    queues.add(key[: -len(suffix)])
+        for key in self.r.scan_iter("*:delay"):
+            if self._zset_contains_qtask_message(key):
+                queues.add(key[: -len(":delay")])
         for key in self.r.scan_iter("*:processing:*"):
-            queues.add(key.split(":processing:", 1)[0])
+            if self._list_contains_qtask_message(key):
+                queues.add(key.split(":processing:", 1)[0])
         return sorted(queues)
 
     def queue_stats(self, queue_name: str) -> Dict[str, int]:
@@ -99,10 +104,7 @@ class QueueAdmin:
         if not task_ids:
             return {"total": total, "completed": 0, "failed": 0}
 
-        pipe = self.r.pipeline()
-        for task_id in task_ids:
-            pipe.hget(f"qtask:task:{task_id}", "status")
-        statuses = pipe.execute()
+        statuses = [record.get("status") for record in self._read_history_records(task_ids)]
 
         sampled_completed = sum(1 for s in statuses if s == "completed")
         sampled_failed = sum(1 for s in statuses if s == "failed")
@@ -484,7 +486,14 @@ class QueueAdmin:
         return {"moved": 0, "task_id": task_id, "queue": queue_name, "from_state": state.value}
 
     def recover(self, queue_name: str, include_active: bool = False) -> Dict[str, int]:
-        recovered = self._drain_list_to_ready(f"{queue_name}:processing", queue_name)
+        legacy_processing = f"{queue_name}:processing"
+        if include_active:
+            recovered = self._drain_list_to_ready(legacy_processing, queue_name)
+            skipped_legacy = 0
+        else:
+            recovered = 0
+            skipped_legacy = int(self.r.llen(legacy_processing))
+
         skipped = 0
         heartbeat_prefix = f"{queue_name}:worker:"
 
@@ -494,7 +503,7 @@ class QueueAdmin:
                 skipped += int(self.r.llen(key))
                 continue
             recovered += self._drain_list_to_ready(key, queue_name)
-        return {"recovered": recovered, "skipped_active": skipped}
+        return {"recovered": recovered, "skipped_active": skipped, "skipped_legacy": skipped_legacy}
 
     def delete_task(
         self,
@@ -815,7 +824,7 @@ class QueueAdmin:
         queue_name: str,
         task_id: Optional[str] = None,
         limit: int = 500,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         if task_id:
             return self._requeue_single_expired(queue_name, task_id)
 
@@ -830,19 +839,70 @@ class QueueAdmin:
             if not tid:
                 continue
             result = self._requeue_single_expired(queue_name, tid)
-            moved += result["moved"]
+            moved += int(result["moved"])
         return {"moved": moved}
 
     def _requeue_single_expired(self, queue_name: str, task_id: str) -> Dict[str, Any]:
         data = self.get_task(task_id)
         if not data:
             return {"moved": 0, "task_id": task_id}
-        payload = data.get("payload", {})
+
+        if not self._is_expired_record(data):
+            return {
+                "moved": 0,
+                "task_id": task_id,
+                "queue": queue_name,
+                "note": "任务未过期",
+            }
+
+        location = self._find_task_location(queue_name, task_id)
+        if location:
+            state, _source_key, _raw_msg = location
+            if state == QueueState.ready:
+                updated = int(self._update_history(task_id, {"status": "pending", "expires_at": ""}))
+                return {
+                    "moved": 0,
+                    "updated": updated,
+                    "task_id": task_id,
+                    "queue": queue_name,
+                    "from_state": state.value,
+                    "note": "任务已在 ready 队列，仅清除过期标记",
+                }
+            if state == QueueState.processing:
+                return {
+                    "moved": 0,
+                    "task_id": task_id,
+                    "queue": queue_name,
+                    "from_state": state.value,
+                    "note": "任务仍在 processing，未自动重放以避免抢占活跃 Worker",
+                }
+
+            result = self.requeue_task(queue_name, task_id, state)
+            if result["moved"]:
+                self._update_history(task_id, {"status": "pending", "expires_at": ""})
+            return result
+
+        if "payload" not in data:
+            return {
+                "moved": 0,
+                "task_id": task_id,
+                "queue": queue_name,
+                "note": "历史记录不含 payload，未重建任务",
+            }
+
+        payload = data.get("payload")
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
             except (json.JSONDecodeError, TypeError):
-                payload = {}
+                payload = None
+        if not isinstance(payload, dict):
+            return {
+                "moved": 0,
+                "task_id": task_id,
+                "queue": queue_name,
+                "note": "历史记录不含可重放 payload，未重建任务",
+            }
         if isinstance(payload, dict) and data.get("action") and not payload.get("action"):
             payload["action"] = data["action"]
         msg = json.dumps({
@@ -852,6 +912,29 @@ class QueueAdmin:
         self.r.lpush(queue_name, msg)
         self._update_history(task_id, {"status": "pending", "expires_at": ""})
         return {"moved": 1, "task_id": task_id, "queue": queue_name}
+
+    def _find_task_location(
+        self,
+        queue_name: str,
+        task_id: str,
+    ) -> Optional[Tuple[QueueState, str, str]]:
+        for state in [
+            QueueState.ready,
+            QueueState.retry,
+            QueueState.dlq,
+            QueueState.delay,
+            QueueState.processing,
+        ]:
+            for key in self._state_keys(queue_name, state):
+                if state == QueueState.delay:
+                    for raw_msg, _score in self.r.zscan_iter(key):
+                        if self._message_task_id(raw_msg) == task_id:
+                            return state, key, cast(str, raw_msg)
+                else:
+                    for raw_msg in self.r.lrange(key, 0, -1):
+                        if self._message_task_id(raw_msg) == task_id:
+                            return state, key, cast(str, raw_msg)
+        return None
 
     def _decode_message(
         self,
@@ -1027,6 +1110,41 @@ class QueueAdmin:
             return json.loads(value)
         except (json.JSONDecodeError, TypeError):
             return value
+
+    @staticmethod
+    def _is_expired_record(data: Dict[str, Any]) -> bool:
+        expires_at = data.get("expires_at")
+        status = data.get("status", "")
+        if not expires_at or status in ("completed", "failed"):
+            return False
+        try:
+            return float(expires_at) < time.time()
+        except (TypeError, ValueError):
+            return False
+
+    def _list_contains_qtask_message(self, key: str) -> bool:
+        try:
+            candidates = [self.r.lindex(key, 0), self.r.lindex(key, -1)]
+        except redis.RedisError:
+            return False
+        return any(self._looks_like_task_message(raw_msg) for raw_msg in candidates if raw_msg)
+
+    def _zset_contains_qtask_message(self, key: str) -> bool:
+        try:
+            candidates = self.r.zrange(key, 0, 0)
+        except redis.RedisError:
+            return False
+        return any(self._looks_like_task_message(raw_msg) for raw_msg in candidates)
+
+    @staticmethod
+    def _looks_like_task_message(raw_msg: Any) -> bool:
+        try:
+            data = json.loads(raw_msg)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("task_id")) and "payload" in data
 
     @staticmethod
     def _float_or_none(value: Any) -> Optional[float]:

@@ -96,6 +96,19 @@ def test_dashboard_lists_queues_and_state_tasks(client, r):
     assert dlq.json()["tasks"][0]["task_id"] == "dlq-1"
 
 
+def test_dashboard_ignores_foreign_redis_lists(client, r):
+    foreign_key = "foreign:list:not-qtask"
+    r.delete(foreign_key)
+    r.lpush(foreign_key, "not a qtask message")
+
+    try:
+        response = client.get("/api/queues")
+        assert response.status_code == 200
+        assert not any(item["name"] == foreign_key for item in response.json())
+    finally:
+        r.delete(foreign_key)
+
+
 def test_dashboard_requeues_single_dlq_task(client, r):
     queue = "qtask_dash_test:sector-em:fetch"
     r.hset("qtask:task:dlq-move", mapping={"task_id": "dlq-move", "status": "failed"})
@@ -163,8 +176,9 @@ def test_dashboard_recover_skips_active_worker(client, r):
     response = client.post(f"/api/queue/{queue}/recover", json={"include_active": False})
 
     assert response.status_code == 200
-    assert response.json() == {"recovered": 2, "skipped_active": 1}
-    assert r.llen(queue) == 2
+    assert response.json() == {"recovered": 1, "skipped_active": 1, "skipped_legacy": 1}
+    assert r.llen(queue) == 1
+    assert r.llen(f"{queue}:processing") == 1
     assert r.llen(f"{queue}:processing:active") == 1
 
 
@@ -265,6 +279,27 @@ def test_dashboard_queue_stats_includes_completed_failed(client, r):
     assert stats["failed"] == 1
     # pending should not be counted as completed or failed
     assert stats["completed"] + stats["failed"] <= stats["history"]
+
+
+def test_dashboard_queue_stats_supports_legacy_string_history(client, r):
+    queue = "qtask_dash_test:legacy-string:fetch"
+    r.set(
+        "qtask:task:legacy-string-task",
+        json.dumps({
+            "task_id": "legacy-string-task",
+            "status": "completed",
+            "action": "legacy_action",
+        }),
+    )
+    r.zadd(f"qtask:hist:{queue}", {"legacy-string-task": time.time()})
+
+    response = client.get(f"/api/queue/{queue}")
+
+    assert response.status_code == 200
+    stats = response.json()["stats"]
+    assert stats["history"] == 1
+    assert stats["completed"] == 1
+    assert stats["failed"] == 0
 
 
 def test_dashboard_delete_queue(client, r):
@@ -444,6 +479,62 @@ def test_dashboard_requeue_expired(client, r):
     r.delete(queue)
     r.delete(f"qtask:task:{task_id}")
     r.delete(f"qtask:hist:{queue}")
+
+
+def test_dashboard_requeue_expired_ready_task_does_not_duplicate_or_lose_payload(client, r):
+    """ready 中的过期任务只清理过期标记，不应重复投递或丢 payload。"""
+    queue = "qtask_dash_test:expired:ready"
+    task_id = "exp-ready-01"
+    now = time.time()
+    payload = {"action": "expired_action", "symbol": "AAPL"}
+    r.lpush(queue, make_msg(task_id, payload))
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id,
+        "status": "pending",
+        "action": "expired_action",
+        "expires_at": str(now - 10),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+
+    response = client.post(
+        f"/api/queue/{queue}/requeue-expired",
+        json={"task_id": task_id},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["moved"] == 0
+    assert result["updated"] == 1
+    assert r.llen(queue) == 1
+    raw = json.loads(r.lindex(queue, 0))
+    assert json.loads(raw["payload"]) == payload
+    assert r.hget(f"qtask:task:{task_id}", "expires_at") == ""
+
+
+def test_dashboard_requeue_expired_without_payload_does_not_rebuild_lossy_task(client, r):
+    """历史记录缺完整 payload 时不能仅凭 action 重建任务。"""
+    queue = "qtask_dash_test:expired:no-payload"
+    task_id = "exp-no-payload"
+    now = time.time()
+    r.hset(f"qtask:task:{task_id}", mapping={
+        "task_id": task_id,
+        "status": "pending",
+        "action": "expired_action",
+        "expires_at": str(now - 10),
+    })
+    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+
+    response = client.post(
+        f"/api/queue/{queue}/requeue-expired",
+        json={"task_id": task_id},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["moved"] == 0
+    assert "payload" in result["note"]
+    assert r.llen(queue) == 0
+    assert r.hget(f"qtask:task:{task_id}", "expires_at") != ""
 
 
 def test_dashboard_requeue_expired_bulk_handles_more_than_fifty(client, r):

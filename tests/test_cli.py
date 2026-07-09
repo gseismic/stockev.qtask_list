@@ -51,7 +51,7 @@ class TestCLI:
         assert result.exit_code == 0
 
     def test_status_with_queue(self, runner, r):
-        r.lpush("stockev_list:test", "test")
+        r.lpush("stockev_list:test", make_msg("status-1", {"action": "status"}))
 
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0
@@ -189,8 +189,9 @@ class TestCLI:
 
         assert result.exit_code == 0
         assert "Skipped 1 active" in result.stdout
-        assert r.llen(queue) == 2
-        assert r.llen(f"{queue}:processing") == 0
+        assert "Skipped legacy processing" in result.stdout
+        assert r.llen(queue) == 1
+        assert r.llen(f"{queue}:processing") == 1
         assert r.llen(f"{queue}:processing:stale") == 0
         assert r.llen(f"{queue}:processing:active") == 1
 
@@ -198,6 +199,7 @@ class TestCLI:
 
         assert forced.exit_code == 0
         assert r.llen(queue) == 3
+        assert r.llen(f"{queue}:processing") == 0
         assert r.llen(f"{queue}:processing:active") == 0
 
     def test_history_can_get_task_without_queue_name(self, runner, r):
