@@ -7,6 +7,15 @@ import redis
 from loguru import logger
 
 
+def _serialize_value(v):
+    """历史字段序列化：None 转空串，容器转 JSON，其余原样。"""
+    if v is None:
+        return ""
+    elif isinstance(v, (dict, list)):
+        return json.dumps(v)
+    return v
+
+
 class TaskHistory:
     """任务历史记录"""
 
@@ -31,44 +40,34 @@ class TaskHistory:
 
     def record(self, task_id: str, data: dict):
         """记录新任务"""
+        pipe = self.r.pipeline()
+        self.record_pipeline(pipe, task_id, data)
+        pipe.execute()
+
+    def record_pipeline(self, pipe, task_id: str, data: dict):
+        """把新任务的历史写入命令追加到调用方的 pipeline（供 push 与入队同管道执行）"""
+        data = dict(data)
         data["task_id"] = task_id
         data["created_at"] = time.time()
 
         task_key = f"{self.task_key_prefix}{task_id}"
 
-        pipe = self.r.pipeline()
         # 使用 hset 存储任务详情，便于原子更新
-        # 处理 None 值，Redis 不接受 NoneType
-        def serialize_value(v):
-            if v is None:
-                return ""
-            elif isinstance(v, (dict, list)):
-                return json.dumps(v)
-            return v
-
         pipe.hset(
             task_key,
-            mapping={k: serialize_value(v) for k, v in data.items()},
+            mapping={k: _serialize_value(v) for k, v in data.items()},
         )
         pipe.expire(task_key, self.ttl_seconds)
 
         pipe.zadd(self.idx_key, {task_id: time.time()})
         pipe.expire(self.idx_key, self.ttl_seconds)
-        pipe.execute()
 
     def update(self, task_id: str, fields: dict) -> bool:
         """更新任务状态 (原子操作)"""
         key = f"{self.task_key_prefix}{task_id}"
 
         # 处理 None 值
-        def serialize_value(v):
-            if v is None:
-                return ""
-            elif isinstance(v, (dict, list)):
-                return json.dumps(v)
-            return v
-
-        mapping = {k: serialize_value(v) for k, v in fields.items()}
+        mapping = {k: _serialize_value(v) for k, v in fields.items()}
         mapping["updated_at"] = time.time()
         hset_args = []
         for field, value in mapping.items():

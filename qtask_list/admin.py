@@ -23,6 +23,7 @@ class QueueState(str, Enum):
     history = "history"
     completed = "completed"
     failed = "failed"
+    skipped = "skipped"
     expired = "expired"
     all = "all"
 
@@ -39,7 +40,6 @@ class QueueAdmin:
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self.r: Any = redis_client or redis.from_url(self.redis_url, decode_responses=True)
         self.storage = storage
-        self._dctx = zstandard.ZstdDecompressor()
 
     # ==================== Queue Discovery ====================
 
@@ -85,38 +85,46 @@ class QueueAdmin:
             "history": history_counts["total"],
             "completed": history_counts["completed"],
             "failed": history_counts["failed"],
+            "skipped": history_counts["skipped"],
             "expired": expired_count,
             "active_workers": sum(1 for worker in workers if worker["active"]),
             "stale_workers": sum(1 for worker in workers if not worker["active"]),
         }
 
     def _history_stats(self, queue_name: str, sample_limit: int = 2000) -> Dict[str, int]:
-        """统计历史任务完成/失败数量。
+        """统计历史任务完成/失败/跳过数量。
 
         在 sample_limit 条内精确计数；超出时按比例外推（近似值）。
         """
         hist_key = f"qtask:hist:{queue_name}"
         total = int(self.r.zcard(hist_key) or 0)
         if total == 0:
-            return {"total": 0, "completed": 0, "failed": 0}
+            return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
 
         task_ids = self.r.zrevrange(hist_key, 0, sample_limit - 1)
         if not task_ids:
-            return {"total": total, "completed": 0, "failed": 0}
+            return {"total": total, "completed": 0, "failed": 0, "skipped": 0}
 
         statuses = [record.get("status") for record in self._read_history_records(task_ids)]
 
         sampled_completed = sum(1 for s in statuses if s == "completed")
         sampled_failed = sum(1 for s in statuses if s == "failed")
+        sampled_skipped = sum(1 for s in statuses if s == "skipped")
 
         if total <= sample_limit:
-            return {"total": total, "completed": sampled_completed, "failed": sampled_failed}
+            return {
+                "total": total,
+                "completed": sampled_completed,
+                "failed": sampled_failed,
+                "skipped": sampled_skipped,
+            }
 
         ratio = total / len(task_ids)
         return {
             "total": total,
             "completed": int(sampled_completed * ratio),
             "failed": int(sampled_failed * ratio),
+            "skipped": int(sampled_skipped * ratio),
         }
 
     def _expired_count(self, queue_name: str, sample_limit: int = 200) -> int:
@@ -212,7 +220,7 @@ class QueueAdmin:
                 QueueState.dlq,
                 QueueState.delay,
             ]
-        elif selected_state in (QueueState.completed, QueueState.failed):
+        elif selected_state in (QueueState.completed, QueueState.failed, QueueState.skipped):
             # 按 status 过滤 history
             status = selected_state.value
             return self._read_history_by_status(
@@ -304,7 +312,12 @@ class QueueAdmin:
         """从队列中查找任务消息并还原完整 payload（解压 / 拉取外存）。"""
         selected_state = QueueState(state) if state in QueueState._value2member_map_ else QueueState.all
 
-        if selected_state == QueueState.history:
+        if selected_state in (
+            QueueState.history,
+            QueueState.completed,
+            QueueState.failed,
+            QueueState.skipped,
+        ):
             task = self.get_task(task_id)
             if not task:
                 return {"task_id": task_id, "payload": None, "_note": "历史记录不含完整 payload"}
@@ -364,7 +377,8 @@ class QueueAdmin:
             if payload.get("_compressed"):
                 try:
                     compressed = base64.b64decode(payload["data"])
-                    raw = self._dctx.decompress(compressed)
+                    # 每次新建解压上下文：dashboard 线程池并发调用，共享实例不安全
+                    raw = zstandard.ZstdDecompressor().decompress(compressed)
                     payload = json.loads(raw)
                 except Exception as e:
                     return {"task_id": task_id, "payload": payload, "_note": f"解压失败: {e}"}
@@ -442,11 +456,14 @@ class QueueAdmin:
         self,
         queue_name: str,
         task_id: Optional[str] = None,
+        reset_retry: bool = True,
     ) -> Dict[str, int]:
         if task_id:
-            moved = int(self.requeue_task(queue_name, task_id, QueueState.dlq)["moved"])
+            moved = int(self.requeue_task(queue_name, task_id, QueueState.dlq, reset_retry=reset_retry)["moved"])
             return {"moved": moved}
-        count = self._drain_list_to_ready(f"{queue_name}:dlq", queue_name, update_status=True)
+        count = self._drain_list_to_ready(
+            f"{queue_name}:dlq", queue_name, update_status=True, reset_retry=reset_retry
+        )
         return {"moved": count}
 
     def requeue_task(
@@ -454,10 +471,22 @@ class QueueAdmin:
         queue_name: str,
         task_id: str,
         from_state: QueueState | str,
+        reset_retry: bool = True,
     ) -> Dict[str, Any]:
         state = QueueState(from_state)
         if state in {QueueState.ready, QueueState.history, QueueState.all}:
             return {"moved": 0, "task_id": task_id, "queue": queue_name, "from_state": state.value}
+
+        if state == QueueState.processing:
+            guard = self._check_active_processing(queue_name, task_id)
+            if guard:
+                return {
+                    "moved": 0,
+                    "task_id": task_id,
+                    "queue": queue_name,
+                    "from_state": state.value,
+                    **guard,
+                }
 
         for key in self._state_keys(queue_name, state):
             if state == QueueState.delay:
@@ -474,7 +503,10 @@ class QueueAdmin:
             else:
                 for raw_msg in self.r.lrange(key, 0, -1):
                     if self._message_task_id(raw_msg) == task_id:
-                        moved = self._move_list_message(key, queue_name, raw_msg)
+                        new_msg = (
+                            self._reset_message_retry(raw_msg) if reset_retry and state == QueueState.dlq else raw_msg
+                        )
+                        moved = self._move_list_message(key, queue_name, raw_msg, new_msg)
                         self._update_history(task_id, {"status": "pending"})
                         return {
                             "moved": int(moved),
@@ -484,6 +516,20 @@ class QueueAdmin:
                         }
 
         return {"moved": 0, "task_id": task_id, "queue": queue_name, "from_state": state.value}
+
+    def _check_active_processing(self, queue_name: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """拒绝从活跃 Worker 的 processing 重放，避免与正在执行的 handler 冲突。"""
+        heartbeat_prefix = f"{queue_name}:worker:"
+        for key in self.processing_keys(queue_name, include_legacy=False):
+            worker_id = key.rsplit(":", 1)[-1]
+            if not self.r.exists(f"{heartbeat_prefix}{worker_id}"):
+                continue
+            for raw_msg in self.r.lrange(key, 0, -1):
+                if self._message_task_id(raw_msg) == task_id:
+                    return {
+                        "note": f"任务在活跃 worker {worker_id} 的 processing 中，拒绝重放；如确需强制请先 recover",
+                    }
+        return None
 
     def recover(self, queue_name: str, include_active: bool = False) -> Dict[str, int]:
         legacy_processing = f"{queue_name}:processing"
@@ -991,12 +1037,17 @@ class QueueAdmin:
         source: str,
         queue_name: str,
         update_status: bool = False,
+        reset_retry: bool = False,
     ) -> int:
         count = 0
         collected_task_ids: List[str] = []
         while True:
-            msg = self.r.rpoplpush(source, queue_name)
+            msg = self.r.lindex(source, -1)
             if not msg:
+                break
+            new_msg = self._reset_message_retry(msg) if reset_retry else msg
+            moved = self._move_list_message(source, queue_name, msg, new_msg)
+            if not moved:
                 break
             count += 1
             if update_status:
@@ -1007,16 +1058,31 @@ class QueueAdmin:
             self._batch_update_status(collected_task_ids, queue_name)
         return count
 
-    def _move_list_message(self, source: str, destination: str, raw_msg: str) -> bool:
+    def _move_list_message(self, source: str, destination: str, raw_msg: str, new_msg: Optional[str] = None) -> bool:
         lua_script = """
         local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
         if removed == 0 then
             return 0
         end
-        redis.call('LPUSH', KEYS[2], ARGV[1])
+        redis.call('LPUSH', KEYS[2], ARGV[2])
         return removed
         """
-        return bool(self.r.eval(lua_script, 2, source, destination, raw_msg))
+        return bool(self.r.eval(lua_script, 2, source, destination, raw_msg, new_msg or raw_msg))
+
+    def _reset_message_retry(self, raw_msg: str) -> str:
+        """剥离 DLQ 消息中的 _retry 计数（人工重放视为全新尝试）。解码失败原样返回。"""
+        try:
+            data = json.loads(raw_msg)
+            if not isinstance(data, dict):
+                return raw_msg
+            payload_raw = data.get("payload", {})
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+            if not isinstance(payload, dict):
+                return raw_msg
+            payload.pop("_retry", None)
+            return SmartQueue._build_envelope(str(data["task_id"]), payload, data.get("expires_at"))
+        except Exception:
+            return raw_msg
 
     def _move_delay_message(self, source: str, destination: str, raw_msg: str) -> bool:
         lua_script = """
@@ -1163,6 +1229,7 @@ class QueueAdmin:
                 ":dlq",
                 ":delay",
                 ":worker:",
+                ":dedup:",
             ]
         )
 

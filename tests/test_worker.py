@@ -73,7 +73,8 @@ class TestWorker:
         assert r.llen("testns:result_out") == 1
 
     def test_worker_exception_handling(self, redis_url, r):
-        q = SmartQueue(redis_url, "exception_test", namespace="testns")
+        # retry_backoff_base=0 保留旧的立即重试行为（默认走 delay 退避）
+        q = SmartQueue(redis_url, "exception_test", namespace="testns", retry_backoff_base=0)
         
         q.push({"action": "error_task"})
         

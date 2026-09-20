@@ -35,6 +35,12 @@ class Worker:
         redis_client: Optional[Any] = None,
         worker_id: Optional[str] = None,
         heartbeat_ttl: int = 120,
+        retry_backoff_base: int = 30,
+        retry_backoff_max: int = 3600,
+        record_history: bool = True,
+        archive_dir: Optional[str] = None,
+        monitor_threshold_mb: Optional[int] = None,
+        stale_recover_interval: int = 300,
     ):
         self.redis_url = redis_url
         self.worker_id = (worker_id or f"{os.getpid()}-{uuid.uuid4().hex}").replace(":", "_")
@@ -52,6 +58,9 @@ class Worker:
             max_retry=max_retry,
             redis_client=redis_client,
             processing_key=processing_key,
+            retry_backoff_base=retry_backoff_base,
+            retry_backoff_max=retry_backoff_max,
+            record_history=record_history,
         )
 
         self.result_queue = result_queue
@@ -70,6 +79,15 @@ class Worker:
         self._shutdown_event = threading.Event()
         self._draining = False
         self.maintenance_interval = maintenance_interval
+        # 归档目录：多 Worker 部署必须指向同一共享目录，避免归档分裂
+        self.archive_dir = (
+            archive_dir
+            or os.environ.get("QTASK_ARCHIVE_DIR")
+            or os.path.abspath("archive_data")
+        )
+        self.monitor_threshold_mb = monitor_threshold_mb
+        # 周期性恢复失联 Worker 的 processing 任务（不只在自己启动时）
+        self.stale_recover_interval = max(stale_recover_interval, 30)
 
     def _refresh_heartbeat(self):
         self.queue.r.set(self._heartbeat_key, str(time.time()), ex=self.heartbeat_ttl)
@@ -80,6 +98,9 @@ class Worker:
         self.queue.r.delete(self._heartbeat_key)
 
     def _signal_handler(self, signum, frame):
+        if not self.running:
+            logger.warning("停止进行中再次收到信号，强制退出")
+            raise KeyboardInterrupt
         sig_name = signal.Signals(signum).name
         logger.info(f"收到信号 {sig_name}({signum})，正在停止 worker {self.worker_id}...")
         self.stop(reason=f"signal:{sig_name}")
@@ -133,12 +154,20 @@ class Worker:
         """定期清理和归档的维护线程"""
         from .archiver import ArchiveManager, Monitor
 
-        archiver = ArchiveManager(self.redis_url)
-        monitor = Monitor(self.queue.r, threshold_mb=512)  # 可配置阈值
+        # 初始化失败不能让维护线程死掉：heartbeat 停止刷新会导致
+        # 存活 Worker 被误判 stale、任务被其他 Worker 抢走
+        archiver = None
+        monitor = None
+        try:
+            archiver = ArchiveManager(self.redis_url, db_dir=self.archive_dir)
+            monitor = Monitor(self.queue.r, threshold_mb=self.monitor_threshold_mb)
+        except Exception as e:
+            logger.error(f"Maintenance init failed, archive/memory check disabled: {e}")
 
         logger.info("Maintenance thread started")
 
         last_maintenance = 0
+        last_stale_recover = 0
         _heartbeat_log_interval = max(60, self.heartbeat_interval)
         _last_heartbeat_log = 0
         while self.running or self._draining:
@@ -154,14 +183,24 @@ class Worker:
                         )
                         _last_heartbeat_log = now
 
-                    # 检查内存
-                    monitor.check_health()
+                    # 检查内存（未配置阈值时为空操作）
+                    if monitor:
+                        monitor.check_health()
+
+                    # 周期性恢复失联 Worker 的 processing 任务，
+                    # 避免崩溃 Worker 的任务要等到其他 Worker 重启才被接手
+                    if now - last_stale_recover > self.stale_recover_interval:
+                        recovered = self.queue.recover_stale_processing(self._heartbeat_prefix)
+                        if recovered:
+                            logger.info(f"Recovered {recovered} tasks from stale processing queues")
+                        last_stale_recover = now
 
                     # 定期归档
                     if now - last_maintenance > self.maintenance_interval:
-                        count = archiver.archive_to_sqlite(self.queue.base, days_ago=1)
-                        if count > 0:
-                            logger.info(f"Archived {count} tasks to SQLite")
+                        if archiver:
+                            count = archiver.archive_to_sqlite(self.queue.base, days_ago=1)
+                            if count > 0:
+                                logger.info(f"Archived {count} tasks to SQLite")
                         last_maintenance = now
 
             except Exception as e:
@@ -177,26 +216,43 @@ class Worker:
         logger.info("Maintenance thread stopped")
 
     def _poll_once(self) -> bool:
-        self._refresh_heartbeat()
-        self.queue.move_retry()
-        self.queue.move_delay()
-
-        # pop 阻塞超时设置为 2 秒，以便能响应停止信号
-        payload, raw = self.queue.pop(timeout=2)
-
-        if raw is None or payload is None:
-            return False
-
+        # 并发模式下先（带超时地）获取信号量再 pop：
+        # 1. 线程池满时主循环阻塞在 acquire 且无法响应停止信号；
+        # 2. 先 pop 后 acquire 会让任务滞留 processing，只能靠 stale recovery 兜底。
+        acquired = False
         if self.max_workers > 1:
-            # 获取许可
             if self._semaphore is None or self.executor is None:
                 raise RuntimeError("Thread pool is not initialized")
-            self._semaphore.acquire()
-            self.executor.submit(self._process_task_with_semaphore, payload, raw)
-        else:
-            self._process_task(payload, raw)
+            while self.running:
+                if self._semaphore.acquire(timeout=1):
+                    acquired = True
+                    break
+            if not acquired:
+                return False
 
-        return True
+        try:
+            self._refresh_heartbeat()
+            self.queue.move_retry()
+            self.queue.move_delay()
+
+            # pop 阻塞超时设置为 2 秒，以便能响应停止信号
+            payload, raw = self.queue.pop(timeout=2)
+
+            if raw is None or payload is None:
+                return False
+
+            if self.max_workers > 1:
+                # 许可转移给包装器，任务完成后释放
+                acquired = False
+                assert self.executor is not None
+                self.executor.submit(self._process_task_with_semaphore, payload, raw)
+            else:
+                self._process_task(payload, raw)
+
+            return True
+        finally:
+            if acquired and self._semaphore:
+                self._semaphore.release()
 
     def _worker_loop(self):
         """Worker 主循环"""
@@ -217,6 +273,8 @@ class Worker:
                         )
             except Exception as e:
                 logger.exception(f"Worker loop error: {e}")
+                # 异常退避（如 Redis 断连），避免无间隔空转刷日志
+                time.sleep(1)
 
         logger.info("Worker stopped")
 

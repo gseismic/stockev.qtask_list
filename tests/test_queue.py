@@ -48,7 +48,8 @@ class TestSmartQueue:
         assert r.llen("testns:batch_test") == 3
 
     def test_fail_and_retry(self, redis_url, r):
-        q = SmartQueue(redis_url, "retry_test", namespace="testns", max_retry=2)
+        # retry_backoff_base=0 保留旧的立即重试（retry list）行为；默认走 delay 退避见 test_plan014
+        q = SmartQueue(redis_url, "retry_test", namespace="testns", max_retry=2, retry_backoff_base=0)
         q.push({"action": "test"})
 
         payload, raw = q.pop()

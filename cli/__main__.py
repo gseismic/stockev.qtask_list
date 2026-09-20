@@ -289,8 +289,11 @@ def requeue(
     namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
     force: bool = typer.Option(False, "--force", "-f", help="强制执行"),
+    keep_retry: bool = typer.Option(
+        False, "--keep-retry", help="保留原有重试计数（默认重置，人工重放视为全新尝试）"
+    ),
 ):
-    """将 DLQ 中的任务重新入队"""
+    """将 DLQ 中的任务重新入队（默认重置重试计数）"""
     queue_name = normalize_queue_name(queue_name, namespace)
     if not force:
         target = f"task {task_id}" if task_id else "all tasks"
@@ -300,7 +303,7 @@ def requeue(
 
     admin = admin_from_url(redis_url)
     if task_id:
-        moved = int(admin.requeue_dlq(queue_name, task_id)["moved"])
+        moved = int(admin.requeue_dlq(queue_name, task_id, reset_retry=not keep_retry)["moved"])
         if moved:
             console.print(f"[green]Requeued task {task_id} from DLQ[/green]")
         else:
@@ -308,7 +311,7 @@ def requeue(
             raise typer.Exit(1)
         return
 
-    count = admin.requeue_dlq(queue_name)["moved"]
+    count = admin.requeue_dlq(queue_name, reset_retry=not keep_retry)["moved"]
     console.print(f"[green]Requeued {count} tasks from DLQ[/green]")
 
 

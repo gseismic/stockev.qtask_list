@@ -5,14 +5,16 @@
 ## 特性
 
 - **可靠消费**：`BRPOPLPUSH` 原子操作，Worker 崩溃不丢任务
-- **自动重试**：处理失败自动进入 retry 队列，超限进入 DLQ
-- **延迟任务**：基于 Redis Sorted Set 的定时任务，Lua 脚本原子迁移
-- **Crash Recovery**：Worker 意外退出后自动恢复 processing 中的任务
+- **重试退避**：失败按指数退避（30s 起步，±10% 抖动）写入延迟队列，不再瞬时烧光重试次数
+- **业务去重**：`logical_key` 身份键（SETNX+TTL），动态列表重复投递零成本防重
+- **执行截止**：`expire_seconds` 写入消息信封，pop 时强制检查，过期任务跳过不执行（历史标记 `skipped`）
+- **延迟任务**：基于 Redis Sorted Set 的定时任务，Lua 脚本原子迁移（单次批量上限 500）
+- **Crash Recovery**：Worker 意外退出后自动恢复 processing 中的任务；维护线程周期性接手失联 Worker 的任务
 - **多级流水线**：通过 `result_queue` 串联多个 Worker，构建多阶段处理管道
-- **大 payload 外存**：超过阈值自动走 RemoteStorage，避免撑爆 Redis
+- **大 payload 外存**：超过阈值自动走 RemoteStorage，避免撑爆 Redis；瞬时拉取失败延后重试不进 DLQ
 - **信号量背压**：线程池 Semaphore 防止任务排队无限增长
 - **批量 Pipeline**：push_batch、历史查询、归档均使用 Redis Pipeline 减少 RTT
-- **历史归档**：Redis 任务历史定期归档到 SQLite
+- **历史归档**：仅 terminal 状态（completed/failed/skipped）的任务归档到 SQLite，live 任务历史保留 Redis
 
 ## 安装
 
@@ -116,11 +118,22 @@ task_id = q.push({"action": "fetch_stock", "symbol": "AAPL"})
 # 延迟任务 (60 秒后执行)
 task_id = q.push({"action": "fetch_stock", "symbol": "AAPL"}, delay_seconds=60)
 
-# 批量推送 (Redis Pipeline 优化)
-task_ids = q.push_batch([
-    {"action": "fetch_stock", "symbol": "AAPL"},
-    {"action": "fetch_stock", "symbol": "TSLA"},
-])
+# 业务身份键去重：同键任务存在时跳过投递并返回 None
+task_id = q.push(
+    {"action": "fetch_kline", "symbol": "AAPL"},
+    logical_key="kline:AAPL:1d:2026-09-19",  # 身份键：类型:主体:时间桶
+    expire_seconds=7 * 86400,                  # 执行截止：超期未执行则 pop 时跳过
+)
+task_id = q.push(..., logical_key="kline:AAPL:1d:2026-09-19", force=True)  # 显式绕过去重
+
+# 批量推送 (Redis Pipeline 优化)；支持 delay/expire/logical_keys，被去重的项返回 None
+task_ids = q.push_batch(
+    [
+        {"action": "fetch_news", "url": "https://.../a"},
+        {"action": "fetch_news", "url": "https://.../b"},
+    ],
+    logical_keys=["news:sha(a)", "news:sha(b)"],
+)
 ```
 
 **消费端 API：**
@@ -141,9 +154,9 @@ q.fail(raw_msg, "error reason")   # 标记失败，自动判断重试或入 DLQ
 
 ```python
 q.recover()        # Crash recovery: processing → 主队列
-q.move_retry()     # retry 队列 → 主队列
-q.move_delay()     # delay 到期 → 主队列 (Lua 原子操作)
-q.requeue_dlq()    # DLQ → 主队列
+q.move_retry()     # retry 队列 → 主队列（仅 retry_backoff_base=0 的旧路径使用）
+q.move_delay()     # delay 到期 → 主队列 (Lua 原子操作，单次最多 500 条)
+q.requeue_dlq()    # DLQ → 主队列，默认重置重试计数（reset_retry=True）
 q.clear()          # 清空所有子队列
 q.get_stats()      # 返回 {"queue": N, "processing": N, "retry": N, "dlq": N, "delay": N}
 ```
@@ -151,8 +164,10 @@ q.get_stats()      # 返回 {"queue": N, "processing": N, "retry": N, "dlq": N, 
 **关键设计决策：**
 
 - `pop()` 使用 `BRPOPLPUSH`（非 `BLPOP`），取任务的同时推入 `processing` 队列。Worker 使用带 heartbeat 的专属 processing key，只自动恢复已失联 Worker 的任务。
-- `move_delay()` 使用 Redis **Lua 脚本**，原子地将到期任务从 ZSET 迁移到主队列。
-- 大 payload 自动外存：push 时超过 `large_threshold` 则上传到 `RemoteStorage`，队列中仅存引用。
+- 重试退避：`fail()` 未耗尽重试次数时按 `retry_backoff_base * 2^(retry-1)`（±10% 抖动，上限 `retry_backoff_max`）写入 delay ZSET，到点由 `move_delay()` 迁回主队列。`retry_backoff_base=0` 恢复旧的立即重试行为。带退避的重试任务在 delay 视图可见（payload 携带 `_retry`），历史状态为 `retry`。
+- 执行截止：`expire_seconds` 写入消息信封 `expires_at`，pop 时强制检查；过期任务直接丢弃并标记历史 `skipped`，不进 DLQ（重放也无意义）。旧格式消息无此字段则不强制。
+- `move_delay()` 使用 Redis **Lua 脚本**，原子地将到期任务从 ZSET 迁移到主队列，单次调用最多迁移 500 条，避免同一秒大量任务到期时阻塞 Redis。
+- 大 payload 自动外存：push 时超过 `large_threshold` 则上传到 `RemoteStorage`，队列中仅存引用。消费端未配置 storage 时显式报错进 DLQ（配置错误）；storage 瞬时不可用时任务移入 delay 稍后重试，不进 DLQ。
 
 ### Worker — 任务处理器
 
@@ -237,9 +252,13 @@ admin.delete_queue("stockev:day-kline:fetch")  # 删除整条队列及历史，�
 admin.diagnose("stockev:day-kline:fetch")
 ```
 
-`QueueState` 用户可见状态：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `expired`, `all`。
+`QueueState` 用户可见状态：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `skipped`, `expired`, `all`。
 
 `expired` 表示业务任务过期：投递时通过 `expire_seconds` 写入 `expires_at`，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
+
+`skipped` 表示任务在 pop 时已过执行截止（`expires_at`），被跳过未执行——与 `expired` 视图（历史标记角度）配合使用。
+
+DLQ 重放（`admin.requeue_dlq` / `qtask requeue`）默认剥离消息中的 `_retry` 计数：人工重放视为全新尝试，可完整走完重试预算；保留原计数请传 `reset_retry=False`（CLI `--keep-retry`）。从活跃 Worker 的 processing 重放会被拒绝，需先执行 recover。
 
 ### TaskHistory — 任务历史
 
@@ -293,6 +312,66 @@ pip install -e ".[storage]"
 SQLite 表结构：`task_history(task_id, queue_name, action, status, payload, result, created_at, updated_at, raw_data)`
 
 **Monitor**：`Redis INFO MEMORY` 监控，超阈值告警。
+
+## 任务身份与去重（logical_key）
+
+动态增长的抓取列表（新闻等）和定时抓取场景需要"同一业务对象不重复投递"。规则：
+
+```
+logical_key = 任务类型 : 业务主体 : 数据时间桶
+```
+
+- **显式声明**：身份键由调用方传入，库不做 payload 自动哈希（URL 带时间戳/query 参数会让自动哈希失效）。
+- **时间桶编进键**：跨期天然是新键，同桶重推被去重。dedup 键的 TTL 只做垃圾清理（默认 86400s，或 `expire_seconds*2`），不承担窗口语义。
+- **失败自愈**：进 DLQ 的死任务只占住自己的时间桶（靠 TTL 过期），下一个时间桶是新键，调度下一轮自动恢复，不会被卡住。
+
+各场景键模板与执行截止策略：
+
+| 任务类型 | logical_key 示例 | 时间桶 | expire_seconds（执行截止） |
+|---|---|---|---|
+| 日 K 线 | `kline:AAPL:1d:2026-09-19` | 交易日 | 无或 7 天（回补合法） |
+| 5min 行情快照 | `quote:AAPL:20260920T1310` | 采样周期 | 桶结束 + 容忍度（如 420s） |
+| 股票列表发现 | `universe:20260920-am` | 固定窗口（如 4h） | 下个桶开始前 |
+| 新闻抓取 | `news:sha256(url)` | 条目即身份 | 无或数天 |
+
+三个生命周期不要混淆：dedup 键 TTL（垃圾清理）、`expire_seconds`（执行截止，pop 强制检查）、`ttl_days`（历史保留）。
+
+同一 `logical_key` 建议同时作为数据库唯一约束（如 kline 表 symbol+period+trade_date）：队列挡投递、唯一键挡落库，两层一个身份。
+
+## 使用约束（重要）
+
+1. **at-least-once 交付**：crash recovery 会重跑"已执行但未 ack"的任务；handler 先推 result_queue 后 ack 的窗口也会造成下游重复。**落库逻辑必须幂等（upsert / 唯一约束）**。
+2. **handler 必须自带超时**：库没有任务级超时，线程无法强杀。所有外部 HTTP 请求必须设置 timeout，否则线程永久占用并发额度，且 heartbeat 持续刷新导致 stale recovery 不会接管。
+3. **重试语义**：`max_retry=3` 表示**总共执行 3 次**（首次 + 2 次重试），不是首次之外再重试 3 次。
+4. **并发注意**：`max_workers>1` 时同一业务对象（如同一 symbol）的两个任务可能并发执行；需要严格串行请用 `max_workers=1` 或按对象分队列。库不做 per-key 串行化，logical_key 只保证"同键至多一个在途任务"。
+
+## 定时抓取部署模式（场景示例）
+
+定时抓取推荐**外置 cron + logical_key 去重**，而不是在 handler 里自我续期（失败进 DLQ 会断链，re-push 与 ack 之间的崩溃会分裂周期链）：
+
+```python
+# scheduler.py — 由 crontab / systemd timer 每 5 分钟调用
+from qtask_list import SmartQueue
+
+q = SmartQueue("redis://localhost:6379/0", "quote", namespace="stockev")
+
+bucket = time.strftime("%Y%m%dT%H%M")  # 5min 时间桶编进身份键
+for symbol in watchlist():
+    q.push(
+        {"action": "fetch_quote", "symbol": symbol},
+        logical_key=f"quote:{symbol}:{bucket}",
+        expire_seconds=420,  # 桶结束 + 容忍度，过期的快照不落地
+    )
+```
+
+```bash
+# crontab：每 5 分钟投一轮
+*/5 * * * * cd /path/to/app && python scheduler.py
+```
+
+- 上一轮未消费完时，下一轮的同键任务被去重，不会堆积。
+- 单只股票抓取失败进 DLQ 不影响下一轮（新桶新键），DLQ 只需定期巡检（`qtask status` / Dashboard）。
+- 回补（批量下载）与定时任务**分队列部署**：单队列 FIFO 下大批量回补会让时效敏感的定时任务排队过期。
 
 ## 快速开始
 
@@ -459,11 +538,17 @@ qtask dashboard --host 0.0.0.0 --no-open
 |------|--------|------|
 | `redis_url` | `redis://localhost:6379/0` | Redis 连接地址 |
 | `namespace` | `""` | 命名空间，多项目隔离 |
-| `max_retry` | `3` | 最大重试次数，超限进入 DLQ |
+| `max_retry` | `3` | 最大执行次数（总共），超限进入 DLQ |
+| `retry_backoff_base` | `30` | 重试退避基数（秒），指数退避；0 = 旧的立即重试 |
+| `retry_backoff_max` | `3600` | 单次重试退避上限（秒） |
 | `large_threshold` | `50KB` | 大 payload 阈值，超限走 RemoteStorage |
 | `ttl_days` | `15` | 历史记录保留天数 |
+| `record_history` | `True` | 是否写任务历史（高频低价值队列可关闭省内存） |
 | `max_workers` | `1` | Worker 线程池并发数 |
 | `maintenance_interval` | `1800` (30min) | 维护线程执行间隔（归档+健康检查） |
+| `stale_recover_interval` | `300` | 维护线程接手失联 Worker 任务的间隔（秒） |
+| `archive_dir` | `$QTASK_ARCHIVE_DIR` 或 `./archive_data` 绝对路径 | SQLite 归档目录；多 Worker 必须共享同一目录 |
+| `monitor_threshold_mb` | `None` | Redis 内存告警阈值（MB），不设则不检查 |
 
 ## 环境变量
 

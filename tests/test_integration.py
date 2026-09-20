@@ -73,7 +73,8 @@ class TestIntegration:
 
     def test_retry_then_success(self, redis_url, r):
         """测试重试后成功"""
-        q = SmartQueue(redis_url, "retry_success", namespace="integration", max_retry=3)
+        # retry_backoff_base=0 保留旧的立即重试行为（默认走 delay 退避）
+        q = SmartQueue(redis_url, "retry_success", namespace="integration", max_retry=3, retry_backoff_base=0)
 
         q.push({"action": "unreliable", "fail_count": 0})
 

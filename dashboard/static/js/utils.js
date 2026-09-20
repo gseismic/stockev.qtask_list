@@ -1,4 +1,4 @@
-export const states = ["all", "ready", "processing", "retry", "dlq", "delay", "completed", "failed", "expired", "history"];
+export const states = ["all", "ready", "processing", "retry", "dlq", "delay", "completed", "failed", "skipped", "expired", "history"];
 
 export function stateLabel(state) {
     const labels = {
@@ -10,6 +10,7 @@ export function stateLabel(state) {
         delay: "延迟",
         completed: "已完成",
         failed: "已失败",
+        skipped: "已跳过",
         expired: "已过期",
         history: "历史",
         active: "活跃",

@@ -49,14 +49,18 @@ class Monitor:
 class ArchiveManager:
     """SQLite 归档管理器"""
 
+    # 只归档 terminal 状态：仍在队列中的 live 任务（ready/processing/retry/delay）
+    # 历史必须保留在 Redis，否则任务完成后 ack/fail 的历史更新会静默丢失
+    TERMINAL_STATUSES = ("completed", "failed", "skipped")
+
     def __init__(self, redis_url: str, db_dir: str = "archive_data", prefix: str = "qtask_hist"):
         self.redis_url = redis_url
         self.r: Any = redis.from_url(redis_url, decode_responses=True)
         self.db_dir = db_dir
         self.prefix = prefix
 
-        if not os.path.exists(self.db_dir):
-            os.makedirs(self.db_dir)
+        # exist_ok：多 Worker 同时启动时并发创建同一目录不报错
+        os.makedirs(self.db_dir, exist_ok=True)
 
     def _get_db_path(self, date_str: str) -> str:
         """获取指定日期的 DB 文件路径"""
@@ -90,10 +94,11 @@ class ArchiveManager:
         task_key_prefix = "qtask:task:"
 
         total_archived = 0
+        offset = 0
 
         while True:
-            # 获取一批过期任务 ID
-            task_ids = self.r.zrangebyscore(idx_key, "-inf", cutoff, start=0, num=batch_size)
+            # 获取一批过期任务 ID（live 任务不删除，需用 offset 跳过已检查的窗口）
+            task_ids = self.r.zrangebyscore(idx_key, "-inf", cutoff, start=offset, num=batch_size)
             if not task_ids:
                 break
 
@@ -154,6 +159,9 @@ class ArchiveManager:
             for i, raw in enumerate(raw_tasks):
                 if not raw:
                     continue
+                # live 任务不归档：留在 Redis 历史里，等 terminal 后由下一轮归档
+                if str(raw.get("status", "")) not in self.TERMINAL_STATUSES:
+                    continue
                 tid = task_ids[i]
 
                 # 解析字段
@@ -207,6 +215,13 @@ class ArchiveManager:
                     f"Removed {len(stale_task_ids)} stale history index entries for "
                     f"{queue_full_name}"
                 )
+
+            # 本批有删除（归档或 stale）时剩余条目会前移，从头继续扫描；
+            # 全部是 live 任务时跳过该窗口，避免同一批反复扫描
+            if db_sessions or stale_task_ids:
+                offset = 0
+            else:
+                offset += len(task_ids)
 
             if len(task_ids) < batch_size:
                 break
