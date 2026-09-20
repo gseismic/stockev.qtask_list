@@ -1,7 +1,7 @@
 # 交接文档（HANDOFF）
 
-- 更新时间：2026-09-20 17:40（Asia/Shanghai）
-- 基线 commit：`bb46a4d`（PLAN-015 第一批 V2 核心 WIP 快照，已 push）
+- 更新时间：2026-09-20 18:00（Asia/Shanghai）
+- 基线 commit：`c4372fc`（前端回归收尾 + retry_wait 展示修复，已 push）
 - 交接人：opencode（GLM，会话任务：管理后台 + 前端）
 - 阅读顺序建议：第 1 节 → 第 2 节现状 → 第 3 节未完成清单 → 第 5 节决策记录
 
@@ -69,9 +69,15 @@ codex 会话 01a0bda6-545f-74a3-aeb0-e5435bc2b1d0 按设计稿实施了阶段 A�
 
 ### 3.0 立即要做（本会话被交接文档打断）
 
-1. **提交前端修复**：工作树有 4 个已改文件（`dashboard/static/js/{app,components,utils,api}.js`——api.js 本次未改但保持过检、`dashboard/static/css/app.css`）+ `dashboard/templates/index.html`。node --check 已过、核心路径已浏览器验证。按小步提交习惯单独 commit（中文消息，注明前端适配 V2，不提交 AGENTS.md），然后 push。
-2. **前端回归收尾**（改完后浏览器再过一遍）：投递表单三条路径（payload.action / 显式 action / 都缺失时 toast）、ALLOW_NEW 确认流、危险操作（清空/释放身份/强恢复）、删除队列按钮（仅空队列显示）、错过截止视图、auth 登录页（QTASK_DASHBOARD_USER/PASSWORD 环境变量路径）、dashboard 首屏窄视口（现依赖 .table-wrap overflow-x 滚动，可接受）。
-3. 已知小瑕疵（可选修）：retry_wait tab 内行的徽章显示「延迟」——后端 `_read_delay` 复用 state=delay，前端可在 state=retry_wait 时改标注；演示数据可再次重建（见第 5 节脚本思路）。
+> 2026-09-20 18:00 更新：本节第 1、2、3 条已全部完成（commit fea08a4 + c4372fc）：
+> 前端修复已提交；回归全部通过（投递三条路径 + Redis 对账、ALLOW_NEW/危险操作确认、
+> 删除队列按钮、错过截止视图、auth 登录页、TaskDrawer）；retry_wait 徽章与 tab 计数
+> 瑕疵已修复（utils.js taskState 区分 delay_reason；dashboard/main.py 注入
+> stats.retry_wait）。剩余只有第 3.1 节 Python 侧工作。
+
+1. ~~提交前端修复~~（已完成，fea08a4）
+2. ~~前端回归收尾~~（已完成，见上）
+3. ~~retry_wait 徽章/计数瑕疵~~（已完成，c4372fc）
 
 ### 3.1 Python 部分等用户解禁后处理（当前禁改，除非修 bug）
 
