@@ -1,0 +1,108 @@
+"""股票抓取 Reconciler 示例。
+
+Reconciler 周期性读取期望任务清单，重复执行也只会得到结构化 duplicate 结果；它不
+直接操作 Redis key，也不删除未知任务，从而把“补齐任务”和“破坏性清理”分开。
+
+清单为 JSON Lines，每行至少包含 ``action``、``payload``、``logical_key``，可选
+``start_deadline_at``（带时区 ISO 8601）。
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import sys
+from typing import Any, Iterable
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from qtask_list import QueueAdmin, TaskSpec  # noqa: E402
+
+
+REDIS_URL = "redis://localhost:6379/0"
+QUEUE_NAME = "stockev_list:fetch"
+
+
+def _deadline(value: str | None, now: datetime) -> datetime:
+    """解析清单中的截止时间；缺省值给出一个短而明确的执行窗口。"""
+
+    if value is None:
+        return now + timedelta(minutes=7)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("start_deadline_at must include a timezone")
+    return parsed
+
+
+def load_specs(path: Path | None, *, now: datetime) -> list[TaskSpec]:
+    """读取 JSONL 期望清单；没有文件时生成一个可直接试跑的样例。"""
+
+    if path is None:
+        rows: Iterable[dict[str, Any]] = (
+            {
+                "action": "fetch_quote",
+                "payload": {"symbol": symbol},
+                "logical_key": f"reconcile:quote:{symbol}:{now.date().isoformat()}",
+            }
+            for symbol in ("AAPL", "TSLA", "NVDA")
+        )
+    else:
+        rows = (
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    specs: list[TaskSpec] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"manifest line {index} must be an object")
+        action = row.get("action")
+        payload = row.get("payload")
+        logical_key = row.get("logical_key")
+        if not isinstance(action, str) or not isinstance(payload, dict):
+            raise ValueError(f"manifest line {index} needs action and object payload")
+        if logical_key is not None and not isinstance(logical_key, str):
+            raise ValueError(f"manifest line {index} logical_key must be a string")
+        specs.append(
+            TaskSpec(
+                action=action,
+                payload=payload,
+                logical_key=logical_key,
+                scheduled_for=now,
+                start_deadline_at=_deadline(row.get("start_deadline_at"), now),
+                dedup_until=now + timedelta(days=2),
+                trace_id=row.get("trace_id"),
+            )
+        )
+    return specs
+
+
+def reconcile(admin: QueueAdmin, queue_name: str, specs: list[TaskSpec]) -> None:
+    """通过统一 Admin API 补齐清单，并输出 duplicate_of 供告警或审计使用。"""
+
+    results = admin.enqueue_many(queue_name, specs)
+    stats = admin.queue_stats(queue_name)
+    for result in results:
+        print(result.as_dict())
+    print({"queue": queue_name, "accepted": sum(r.accepted for r in results), "stats": stats})
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="按 JSONL 清单幂等补齐股票任务")
+    parser.add_argument("--redis-url", default=REDIS_URL)
+    parser.add_argument("--queue", default=QUEUE_NAME)
+    parser.add_argument("--manifest", type=Path)
+    args = parser.parse_args()
+
+    now = datetime.now(timezone.utc)
+    admin = QueueAdmin(args.redis_url)
+    reconcile(admin, args.queue, load_specs(args.manifest, now=now))
+
+
+if __name__ == "__main__":
+    main()

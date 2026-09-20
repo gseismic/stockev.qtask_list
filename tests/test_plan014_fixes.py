@@ -48,8 +48,11 @@ class TestLogicalKeyDedup:
         assert t1 is not None
         assert t2 is None
         assert r.llen("testns:dedup") == 1
-        # 去重键带 TTL
-        assert r.ttl(f"{q.dedup_prefix}kline:AAPL:1d:2026-09-19") > 0
+        # V2 live owner 使用哈希 key 且不设置普通 TTL，避免 live 任务提前失去去重锁。
+        owner_key = q._dedup_key("kline:AAPL:1d:2026-09-19")
+        assert r.type(owner_key) == "hash"
+        assert r.ttl(owner_key) == -1
+        assert r.hget(owner_key, "task_id") == t1
         # 不同键不受影响
         t3 = q.push({"action": "fetch"}, logical_key="kline:TSLA:1d:2026-09-19")
         assert t3 is not None
@@ -66,8 +69,9 @@ class TestLogicalKeyDedup:
     def test_push_dedup_ttl_default_follows_expire(self, redis_url, r):
         q = SmartQueue(redis_url, "dedup_ttl", namespace="testns")
         q.push({"action": "fetch"}, expire_seconds=300, logical_key="quote:AAPL:1310")
-        ttl = r.ttl("testns:dedup_ttl:dedup:quote:AAPL:1310")
-        assert 500 <= ttl <= 600  # expire_seconds * 2
+        owner_key = q._dedup_key("quote:AAPL:1310")
+        assert r.ttl(owner_key) == -1
+        assert r.hget(owner_key, "dedup_until") in (None, "")
 
     def test_push_batch_logical_keys(self, redis_url, r):
         q = SmartQueue(redis_url, "dedup_batch", namespace="testns")
@@ -106,11 +110,15 @@ class TestRetryBackoff:
         member = r.zrange("testns:backoff:delay", 0, -1)[0]
         score = r.zscore("testns:backoff:delay", member)
         assert before + 25 <= score <= before + 40  # 30s ±10% 抖动
-        assert q.history.get(tid)["status"] == "retry"
+        record = q.history.get(tid)
+        assert record["status"] == "pending"
+        assert record["outcome"] == ""
+        assert int(record["attempt"]) == 1
+        assert record["delay_reason"] == "retry"
 
     def test_backoff_exhaustion_reaches_dlq(self, redis_url, r):
         q = SmartQueue(redis_url, "backoff_dlq", namespace="testns", max_retry=2)
-        q.push({"action": "b"})
+        tid = q.push({"action": "b"})
         _p, raw = q.pop(timeout=1)
         q.fail(raw, "err")  # _retry=1 → delay
 
@@ -120,7 +128,8 @@ class TestRetryBackoff:
         assert q.move_delay() == 1
 
         payload, raw = q.pop(timeout=1)
-        assert payload["_retry"] == 1
+        assert payload == {"action": "b"}
+        assert int(q.history.get(tid)["attempt"]) == 2
         q.fail(raw, "err")
         assert r.llen("testns:backoff_dlq:dlq") == 1
 
@@ -132,18 +141,18 @@ class TestRetryBackoff:
 
         member = r.zrange("testns:backoff_env:delay", 0, -1)[0]
         envelope = json.loads(member)
-        assert "expires_at" in envelope
+        assert "start_deadline_at" in envelope
 
 
 class TestDeadlineSkip:
     def test_expired_task_skipped_at_pop(self, redis_url, r):
         q = SmartQueue(redis_url, "expired", namespace="testns")
         tid = q.push({"action": "stale"}, expire_seconds=3600)
-        # 把 ready 消息中的 expires_at 改成过去，模拟排队超时
-        msg = r.lindex("testns:expired", 0)
-        data = json.loads(msg)
-        data["expires_at"] = time.time() - 1
-        r.lset("testns:expired", 0, json.dumps(data))
+        # V2 BEGIN_ATTEMPT 从任务记录读取绝对 deadline；修改记录模拟排队超时。
+        r.hset(f"qtask:task:{tid}", mapping={
+            "start_deadline_at": str(time.time() - 1),
+            "expires_at": str(time.time() - 1),
+        })
 
         payload, raw = q.pop(timeout=1)
 
@@ -201,23 +210,31 @@ class TestLargePayloadErrors:
 class TestDlqRequeueReset:
     def test_requeue_dlq_resets_retry(self, redis_url, r):
         q = SmartQueue(redis_url, "rq_reset", namespace="testns", max_retry=1)
-        q.push({"action": "r"})
+        old_id = q.push({"action": "r"})
         _p, raw = q.pop(timeout=1)
         q.fail(raw, "e")  # _retry=1 >= 1 → DLQ
 
         assert q.requeue_dlq() == 1
         payload, raw = q.pop(timeout=1)
-        assert payload.get("_retry", 0) == 0
+        new_id = json.loads(raw)["task_id"]
+        assert new_id != old_id
+        assert payload == {"action": "r"}
+        assert q.history.get(old_id)["outcome"] == "failed"
+        assert q.history.get(new_id)["replay_of"] == old_id
 
     def test_requeue_dlq_keep_retry(self, redis_url, r):
         q = SmartQueue(redis_url, "rq_keep", namespace="testns", max_retry=1)
-        q.push({"action": "r"})
+        old_id = q.push({"action": "r"})
         _p, raw = q.pop(timeout=1)
         q.fail(raw, "e")
 
-        assert q.requeue_dlq(reset_retry=False) == 1
+        with pytest.warns(DeprecationWarning):
+            assert q.requeue_dlq(reset_retry=False) == 1
         payload, raw = q.pop(timeout=1)
-        assert payload["_retry"] == 1
+        new_id = json.loads(raw)["task_id"]
+        assert new_id != old_id
+        assert payload == {"action": "r"}
+        assert int(q.history.get(new_id)["attempt"]) == 1
 
 
 class TestPushBatchParams:
@@ -231,16 +248,18 @@ class TestPushBatchParams:
         q = SmartQueue(redis_url, "batch_expire", namespace="testns")
         q.push_batch([{"action": "a"}], expire_seconds=120)
         msg = r.lindex("testns:batch_expire", 0)
-        assert "expires_at" in json.loads(msg)
+        assert "start_deadline_at" in json.loads(msg)
 
 
 class TestArchiveTerminalOnly:
     def test_live_task_history_not_archived(self, redis_url, r):
         q = SmartQueue(redis_url, "term_arch", namespace="testns")
-        tid_live = q.push({"action": "live"})  # pending，仍在队列
         tid_done = q.push({"action": "done"})
-        q.history.update(tid_done, {"status": "completed"})
+        tid_live = q.push({"action": "live"})  # pending，仍在队列
+        _payload, done_raw = q.pop(timeout=1)
+        q.ack(done_raw)
         two_days_ago = time.time() - 2 * 86400
+        r.hset(f"qtask:task:{tid_done}", "finished_at", two_days_ago)
         r.zadd(q.history.idx_key, {tid_live: two_days_ago, tid_done: two_days_ago})
 
         archiver = ArchiveManager(redis_url, db_dir="./test_arch_term")
@@ -303,8 +322,10 @@ class TestWorkerParams:
         q = SmartQueue(redis_url, "nohist", namespace="testns", record_history=False)
         tid = q.push({"action": "x"})
         assert tid is not None
-        assert r.exists(f"qtask:task:{tid}") == 0
-        assert r.zcard("qtask:hist:testns:nohist") == 0
+        # V2 的 minimal history 仍保留状态机正确性和审计所需的最小记录。
+        assert r.exists(f"qtask:task:{tid}") == 1
+        assert r.zcard("qtask:hist:testns:nohist") == 1
+        assert r.hget(f"qtask:task:{tid}", "history_mode") == "minimal"
 
         # 消费闭环不受影响
         payload, raw = q.pop(timeout=1)

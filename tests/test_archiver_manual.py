@@ -25,6 +25,7 @@ def test_archiver():
 
     # 清理旧数据保证环境纯净
     q.history.clear()
+    q.clear(include_dlq=True)
     if os.path.exists("./test_archives"):
         import shutil
 
@@ -32,10 +33,13 @@ def test_archiver():
 
     # 1. 产生一些历史数据
     task_id = q.push({"action": "test_archive", "payload": "hello"})
-    q.history.update(task_id, {"status": "completed"})
+    _payload, raw_message = q.pop(timeout=1)
+    assert q.ack(raw_message) is True
 
-    # 模拟是一天前的
-    q.r.zadd(q.history.idx_key, {task_id: time.time() - 86400 * 2})
+    # 模拟终态完成时间已超过归档窗口；索引分数和 finished_at 都要过期。
+    old = time.time() - 86400 * 2
+    q.r.hset(f"qtask:task:{task_id}", "finished_at", old)
+    q.r.zadd(q.history.idx_key, {task_id: old})
 
     # 2. 运行归档
     archiver = ArchiveManager(redis_url, db_dir="./test_archives")

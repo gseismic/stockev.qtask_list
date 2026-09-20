@@ -9,6 +9,7 @@ import {
     primaryQueueIssue,
     prettyJson,
     queueActivityCount,
+    retryFamilyCount,
     shortId,
     shouldOpenTaskSamples,
     stateCount,
@@ -123,7 +124,7 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, names
                     h("div", { className: "queue-counts", key: "counts" }, [
                         h("div", { className: "mini-stat", key: "ready" }, [h("strong", {}, queue.queue), h("span", {}, "待")]),
                         h("div", { className: "mini-stat", key: "proc" }, [h("strong", {}, queue.processing), h("span", {}, "中")]),
-                        h("div", { className: "mini-stat", key: "retry" }, [h("strong", {}, queue.retry), h("span", {}, "重试")]),
+                        h("div", { className: "mini-stat", key: "retry" }, [h("strong", {}, retryFamilyCount(queue)), h("span", {}, "重试")]),
                         h("div", { className: "mini-stat", key: "dlq" }, [h("strong", {}, queue.dlq), h("span", {}, "死信")]),
                         h("div", { className: "mini-stat", key: "delay" }, [h("strong", {}, queue.delay), h("span", {}, "延迟")]),
                     ]),
@@ -151,7 +152,7 @@ export function GlobalOverview({ queues }) {
     const totals = queues.reduce((acc, q) => ({
         queue: acc.queue + Number(q.queue || 0),
         processing: acc.processing + Number(q.processing || 0),
-        retry: acc.retry + Number(q.retry || 0),
+        retry: acc.retry + retryFamilyCount(q),
         dlq: acc.dlq + Number(q.dlq || 0),
         delay: acc.delay + Number(q.delay || 0),
         completed: acc.completed + Number(q.completed || 0),
@@ -171,7 +172,8 @@ export function GlobalOverview({ queues }) {
         { label: "死信", value: totals.dlq, tone: totals.dlq > 0 ? "fail" : "" },
     ].filter(item => item.value > 0 || item.tone);
 
-    const totalLive = totals.queue + totals.processing + totals.retry + totals.dlq + totals.delay;
+    // totals.retry 同时包含 retry_wait，而 retry_wait 已经属于 delay，不能重复计算。
+    const totalLive = queues.reduce((sum, queue) => sum + liveCount(queue), 0);
     const totalDone = totals.completed + totals.failed;
 
     return h("div", { className: "global-overview" }, [
@@ -194,7 +196,7 @@ export function StatsGrid({ stats }) {
         { label: "处理中", value: stats.processing },
         { label: "已完成", value: stats.completed, tone: Number(stats.completed || 0) > 0 ? "ok" : "" },
         { label: "已失败", value: stats.failed, tone: Number(stats.failed || 0) > 0 ? "danger" : "" },
-        { label: "待重试", value: stats.retry, tone: Number(stats.retry || 0) > 0 ? "warning" : "" },
+        { label: "待重试", value: retryFamilyCount(stats), tone: retryFamilyCount(stats) > 0 ? "warning" : "" },
         { label: "死信", value: stats.dlq, tone: Number(stats.dlq || 0) > 0 ? "danger" : "" },
         { label: "错过截止", value: stats.deadline_missed, tone: Number(stats.deadline_missed || 0) > 0 ? "warning" : "" },
         { label: "已取消", value: stats.cancelled },

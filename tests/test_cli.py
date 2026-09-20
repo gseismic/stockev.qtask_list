@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 import redis
@@ -75,7 +76,9 @@ class TestCLI:
 
         raw = r.lindex("stockev_list:push_test", 0)
         msg = json.loads(raw)
-        payload = json.loads(msg["payload"])
+        assert msg["version"] == 2
+        assert msg["payload"]["kind"] == "inline"
+        payload = msg["payload"]["data"]
         assert payload == {"action": "fetch", "symbol": "AAPL"}
         assert r.exists(f"qtask:task:{msg['task_id']}") == 1
 
@@ -195,7 +198,7 @@ class TestCLI:
         assert r.llen(f"{queue}:processing:stale") == 0
         assert r.llen(f"{queue}:processing:active") == 1
 
-        forced = runner.invoke(app, ["recover", queue, "--force-active"])
+        forced = runner.invoke(app, ["recover", queue, "--force-active", "--yes"])
 
         assert forced.exit_code == 0
         assert r.llen(queue) == 3
@@ -314,7 +317,15 @@ class TestCLIWorker:
 
 class TestCLICleanHistory:
     def test_clean_history(self, runner, r):
-        r.set("qtask:task:clean1", '{"task_id":"clean1","action":"test"}')
+        old = time.time() - 16 * 86400
+        r.hset("qtask:task:clean1", mapping={
+            "task_id": "clean1",
+            "action": "test",
+            "outcome": "completed",
+            "status": "completed",
+            "operational_message": "0",
+            "finished_at": str(old),
+        })
         r.zadd("qtask:hist:stockev_list:clean_test", {"clean1": 1})
 
         result = runner.invoke(app, ["clean-history", "stockev_list:clean_test"])
@@ -323,8 +334,16 @@ class TestCLICleanHistory:
         assert r.zcard("qtask:hist:stockev_list:clean_test") == 0
 
     def test_clean_history_all_queues(self, runner, r):
-        r.set("qtask:task:clean-all-1", '{"task_id":"clean-all-1","action":"test"}')
-        r.set("qtask:task:clean-all-2", '{"task_id":"clean-all-2","action":"test"}')
+        old = time.time() - 16 * 86400
+        for task_id in ("clean-all-1", "clean-all-2"):
+            r.hset(f"qtask:task:{task_id}", mapping={
+                "task_id": task_id,
+                "action": "test",
+                "outcome": "completed",
+                "status": "completed",
+                "operational_message": "0",
+                "finished_at": str(old),
+            })
         r.zadd("qtask:hist:stockev_list:clean_all_a", {"clean-all-1": 1})
         r.zadd("qtask:hist:testns:clean_all_b", {"clean-all-2": 1})
 

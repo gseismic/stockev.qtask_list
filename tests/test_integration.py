@@ -115,8 +115,8 @@ class TestEdgeCases:
         """测试空 payload"""
         q = SmartQueue(redis_url, "empty", namespace="integration")
 
-        task_id = q.push({})
-        assert task_id is not None
+        with pytest.raises(ValueError, match="action"):
+            q.push({})
 
     def test_large_payload(self, redis_url, r):
         """测试大 payload (超过阈值会触发 storage)"""
@@ -124,7 +124,7 @@ class TestEdgeCases:
         q = SmartQueue(redis_url, "large", namespace="integration", large_threshold=100)
 
         # 创建大于 100 字节的数据
-        large_data = {"data": "x" * 200}
+        large_data = {"action": "large", "data": "x" * 200}
 
         task_id = q.push(large_data)
         assert task_id is not None

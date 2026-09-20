@@ -169,3 +169,9 @@
    - `docs/dev/PLAN-015-qtask-v2-OUTCOME.md`
    - 新增设计/迁移说明（如有）
 3. 提交后立即 `git push`，再核对本地 HEAD 与 `origin/main` 一致。
+
+## 8. 收尾说明
+
+本计划的核心实现、前端回归和 Python 侧 V2 语义收尾已经完成。旧测试迁移、V1 双读
+管理降级、文档/示例同步及最终验证由 `PLAN-016-v2-review-remediation.md` 承接；
+整体结果见 `PLAN-015-qtask-v2-OUTCOME.md`。

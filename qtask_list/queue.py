@@ -1026,6 +1026,12 @@ class SmartQueue:
             if not message:
                 break
             count += 1
+            task_id = self._message_task_id(str(message))
+            if task_id:
+                record = self.history.get(task_id)
+                if record and not record.get("outcome"):
+                    # V1 retry List 没有统一状态脚本，兼容迁移时同步回 ready。
+                    self.history.update(task_id, {"status": "pending", "operational_message": 1})
         return count + self.move_delay()
 
     def move_delay(self) -> int:
@@ -1233,18 +1239,34 @@ class SmartQueue:
             if not task_id:
                 continue
             record = self.history.get(task_id)
-            if record and str(record.get("outcome") or record.get("status")) in {
-                "failed",
-                "skipped",
-                "cancelled",
-            }:
+            descriptor = record.get("payload_descriptor") if record else None
+            if isinstance(descriptor, str):
+                try:
+                    descriptor = orjson.loads(descriptor)
+                except (orjson.JSONDecodeError, TypeError):
+                    descriptor = None
+            replayable = (
+                record is not None
+                and bool(str(record.get("action") or ""))
+                and isinstance(descriptor, dict)
+            )
+            if (
+                record is not None
+                and replayable
+                and str(record.get("outcome") or record.get("status")) in {
+                    "failed",
+                    "skipped",
+                    "cancelled",
+                }
+            ):
                 try:
                     result = self.replay_task(task_id)
                 except ValueError:
+                    result = None
+                if result is not None:
+                    if result.accepted:
+                        count += 1
                     continue
-                if result.accepted:
-                    count += 1
-                continue
             new_message = self._reset_retry_message(raw_message) if reset_retry else raw_message
             moved = self.r.eval(
                 ADMIN_MOVE_LUA,
@@ -1259,6 +1281,10 @@ class SmartQueue:
             )
             if str(moved[0]) == "moved":
                 count += 1
+                if record and not record.get("outcome"):
+                    # 旧 V1 记录没有不可变 outcome，可以恢复为 pending；
+                    # V2 terminal 记录不会走此兼容分支。
+                    self.history.update(task_id, {"status": "pending", "operational_message": 1})
         return count
 
     # ==================== Queue management ====================
@@ -1278,6 +1304,18 @@ class SmartQueue:
     def delay_size(self) -> int:
         return int(self.r.zcard(self.delay))
 
+    def retry_wait_size(self) -> int:
+        """统计 delay ZSET 中由自动失败重试产生的等待任务。"""
+        count = 0
+        for raw_message, _score in self.r.zscan_iter(self.delay):
+            try:
+                envelope = orjson.loads(raw_message)
+            except (orjson.JSONDecodeError, TypeError):
+                continue
+            if isinstance(envelope, dict) and envelope.get("delay_reason") == "retry":
+                count += 1
+        return count
+
     def get_stats(self) -> dict[str, int | float]:
         """获取 operational 深度与 DLQ 最老年龄。"""
         return {
@@ -1285,6 +1323,7 @@ class SmartQueue:
             "ready": self.size(),
             "processing": self.processing_size(),
             "retry": self.retry_size(),
+            "retry_wait": self.retry_wait_size(),
             "dlq": self.dlq_size(),
             "delay": self.delay_size(),
             "dlq_oldest_age": self.dlq_oldest_age(),
@@ -1438,7 +1477,11 @@ class SmartQueue:
                 descriptor = record.get("payload_descriptor")
                 if isinstance(descriptor, dict):
                     retain_until = self._float_or_none(descriptor.get("retain_until"))
-                    if retain_until not in (None, 0) and retain_until <= now + self.external_safety_margin:
+                    if (
+                        isinstance(retain_until, float)
+                        and retain_until > 0
+                        and retain_until <= now + self.external_safety_margin
+                    ):
                         issues.append(
                             {
                                 "type": "external_retention_risk",

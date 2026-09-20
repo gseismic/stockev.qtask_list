@@ -1,15 +1,15 @@
-"""
-Calculate Worker - 计算移动平均线
-消费 finance:calculate 队列，计算 MA，推送到 stockev_list:store 队列
-"""
-import sys
-import os
-import time
+"""Calculate Worker：计算移动平均线并以 TaskSpec 发往存储阶段。"""
+
+from pathlib import Path
 import random
+import sys
+import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from qtask_list import Worker, SmartQueue
+from qtask_list import SmartQueue, TaskContext, TaskResult, TaskSpec, Worker  # noqa: E402
 
 REDIS_URL = "redis://localhost:6379/0"
 STOCKEV_NS = "stockev_list"
@@ -27,7 +27,7 @@ worker = Worker(
 
 
 @worker.on("calculate_ma")
-def calculate_ma(task):
+def calculate_ma(task: dict, context: TaskContext) -> TaskResult:
     symbol = task["symbol"]
     price = task["price"]
     volume = task["volume"]
@@ -40,16 +40,26 @@ def calculate_ma(task):
     ma10 = round(price * random.uniform(0.96, 1.04), 2)
     ma20 = round(price * random.uniform(0.94, 1.06), 2)
     
-    return {
-        "action": "store_result",
-        "symbol": symbol,
-        "price": price,
-        "volume": volume,
-        "ma5": ma5,
-        "ma10": ma10,
-        "ma20": ma20,
-        "timestamp": task["timestamp"],
-    }
+    return TaskResult(
+        value={"symbol": symbol, "price": price, "ma5": ma5, "ma10": ma10, "ma20": ma20},
+        emissions=(
+            TaskSpec(
+                action="store_result",
+                payload={
+                    "symbol": symbol,
+                    "price": price,
+                    "volume": volume,
+                    "ma5": ma5,
+                    "ma10": ma10,
+                    "ma20": ma20,
+                    "timestamp": task["timestamp"],
+                },
+                logical_key=f"store:{context.task_id}",
+                parent_task_id=context.task_id,
+                trace_id=context.trace_id,
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":

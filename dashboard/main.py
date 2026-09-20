@@ -1,4 +1,3 @@
-import json
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -168,25 +167,9 @@ def api_health(_auth: None = Depends(require_auth)):
         return {"status": "error", "error": str(e), "redis": REDIS_URL}
 
 
-def _with_retry_wait(stats: Dict[str, Any], queue_name: str) -> Dict[str, Any]:
-    """V2 中 retry_wait 任务物理上在 delay ZSET（delay_reason=retry），
-    queue_stats 的 retry 只反映旧 V1 retry List（V2 恒为 0），
-    这里从 delay ZSET 派生 retry_wait 计数供前端 tab 展示。"""
-    retry_wait = 0
-    for raw_msg in redis_client.zrange(f"{queue_name}:delay", 0, -1):
-        try:
-            data = json.loads(raw_msg)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(data, dict) and data.get("delay_reason") == "retry":
-            retry_wait += 1
-    stats["retry_wait"] = retry_wait
-    return stats
-
-
 @app.get("/api/queues")
 def api_queues(_auth: None = Depends(require_auth)):
-    return [_with_retry_wait(q, q["name"]) for q in admin.list_queues()]
+    return admin.list_queues()
 
 
 @app.get("/api/workers")
@@ -217,7 +200,7 @@ def api_actions(
 
 @app.get("/api/queue/{name}")
 def api_queue(name: str, _auth: None = Depends(require_auth)):
-    stats = _with_retry_wait(admin.queue_stats(name), name)
+    stats = admin.queue_stats(name)
     return {"name": name, "stats": stats, "workers": admin.list_workers(name)}
 
 
@@ -262,24 +245,27 @@ def api_push_task(
         and not request.confirm_duplicate
     ):
         raise HTTPException(status_code=400, detail="ALLOW_NEW 需要 confirm_duplicate=true")
-    return admin.push_task(
-        name,
-        request.payload,
-        delay_seconds=request.delay_seconds,
-        expire_seconds=request.expire_seconds,
-        action=request.action,
-        logical_key=request.logical_key,
-        scheduled_for=request.scheduled_for,
-        not_before_at=request.not_before_at,
-        start_deadline_at=request.start_deadline_at,
-        dedup_until=request.dedup_until,
-        trace_id=request.trace_id,
-        parent_task_id=request.parent_task_id,
-        concurrency_key=request.concurrency_key,
-        supersede_key=request.supersede_key,
-        supersede_version=request.supersede_version,
-        on_duplicate=request.duplicate_action,
-    )
+    try:
+        return admin.push_task(
+            name,
+            request.payload,
+            delay_seconds=request.delay_seconds,
+            expire_seconds=request.expire_seconds,
+            action=request.action,
+            logical_key=request.logical_key,
+            scheduled_for=request.scheduled_for,
+            not_before_at=request.not_before_at,
+            start_deadline_at=request.start_deadline_at,
+            dedup_until=request.dedup_until,
+            trace_id=request.trace_id,
+            parent_task_id=request.parent_task_id,
+            concurrency_key=request.concurrency_key,
+            supersede_key=request.supersede_key,
+            supersede_version=request.supersede_version,
+            on_duplicate=request.duplicate_action,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/queue/{name}/retry")
@@ -319,11 +305,14 @@ def api_requeue_expired(
     request: RequeueExpiredRequest,
     _auth: None = Depends(require_auth),
 ):
-    return admin.requeue_expired(
-        name,
-        task_id=request.task_id,
-        start_deadline_at=request.start_deadline_at,
-    )
+    try:
+        return admin.requeue_expired(
+            name,
+            task_id=request.task_id,
+            start_deadline_at=request.start_deadline_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/queue/{name}/recover")
@@ -414,7 +403,12 @@ def api_task_requeue(
     request: RequeueTaskRequest,
     _auth: None = Depends(require_auth),
 ):
-    result = admin.requeue_task(request.queue, task_id, request.from_state)
+    try:
+        result = admin.requeue_task(request.queue, task_id, request.from_state)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result["moved"] == 0:
         raise HTTPException(status_code=404, detail="Task not found in requested state")
     return result

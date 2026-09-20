@@ -106,6 +106,9 @@ class QueueAdmin:
             "queue": int(self.r.llen(queue_name)),
             "processing": sum(int(self.r.llen(key)) for key in self.processing_keys(queue_name)),
             "retry": int(self.r.llen(f"{queue_name}:retry")),
+            # V2 自动重试位于 delay ZSET；这里由 Admin 使用自身注入的 Redis
+            # 客户端计算，避免 Dashboard 的全局连接造成跨 DB 统计错误。
+            "retry_wait": self._retry_wait_count(queue_name),
             "dlq": int(self.r.llen(f"{queue_name}:dlq")),
             "delay": int(self.r.zcard(f"{queue_name}:delay")),
             "history": history_counts["total"],
@@ -118,6 +121,18 @@ class QueueAdmin:
             "active_workers": sum(1 for worker in workers if worker["active"]),
             "stale_workers": sum(1 for worker in workers if not worker["active"]),
         }
+
+    def _retry_wait_count(self, queue_name: str) -> int:
+        """统计 delay ZSET 中等待自动重试的 V2 消息数量。"""
+        count = 0
+        for raw_message in self.r.zrange(f"{queue_name}:delay", 0, -1):
+            try:
+                data = json.loads(raw_message)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(data, dict) and data.get("delay_reason") == "retry":
+                count += 1
+        return count
 
     def _history_stats(self, queue_name: str, sample_limit: int = 2000) -> Dict[str, int]:
         """统计历史任务完成/失败/跳过数量。
@@ -428,21 +443,43 @@ class QueueAdmin:
         return None
 
     def _resolve_payload_from_msg(self, raw_msg: str, task_id: str) -> Dict[str, Any]:
+        decode_error: Exception | None = None
+        action_hint = ""
         try:
             queue_name = self._find_history_queue(task_id)
             queue = self._smart_queue(queue_name) if queue_name else None
             if queue is not None:
                 header = queue.codec.header(raw_msg)
                 payload = queue.codec.decode_payload(header)
-                return {"task_id": task_id, "payload": payload, "action": header.action}
+                action = header.action
+                payload_action = payload.get("action") if isinstance(payload, dict) else None
+                if not action and isinstance(payload_action, str):
+                    action = payload_action
+                if not action:
+                    history = self.get_task(task_id)
+                    action = str(history.get("action") or "") if history else ""
+                return {"task_id": task_id, "payload": payload, "action": action}
         except Exception as exc:
-            return {"task_id": task_id, "payload": None, "_note": f"payload 还原失败: {exc}"}
+            # V1 的 header 不包含 action；解码失败后仍继续走下面的兼容
+            # 解析，以便从 payload 或历史记录保留 action。
+            decode_error = exc
+            try:
+                raw_data = json.loads(raw_msg)
+                raw_payload = raw_data.get("payload", {}) if isinstance(raw_data, dict) else {}
+                parsed_payload = (
+                    self._parse_json(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                )
+                if isinstance(parsed_payload, dict) and isinstance(parsed_payload.get("action"), str):
+                    action_hint = parsed_payload["action"]
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         # 无历史队列名时保留 V1 兼容解析。
         try:
             data = json.loads(raw_msg)
         except (json.JSONDecodeError, TypeError):
-            return {"task_id": task_id, "payload": None, "_note": "消息解码失败"}
+            note = f"payload 还原失败: {decode_error}" if decode_error else "消息解码失败"
+            return {"task_id": task_id, "payload": None, "action": action_hint, "_note": note}
 
         payload_raw = data.get("payload", {})
         legacy_payload = self._parse_json(payload_raw) if isinstance(payload_raw, str) else payload_raw
@@ -497,7 +534,10 @@ class QueueAdmin:
             if hist:
                 action = str(hist.get("action") or "")
 
-        return {"task_id": task_id, "payload": legacy_payload, "action": action}
+        result: Dict[str, Any] = {"task_id": task_id, "payload": legacy_payload, "action": action}
+        if decode_error and not action:
+            result["_note"] = f"payload 还原失败: {decode_error}"
+        return result
 
     def diagnose(self, queue_name: str) -> Dict[str, Any]:
         stats = self.queue_stats(queue_name)
@@ -643,7 +683,7 @@ class QueueAdmin:
     ) -> Dict[str, Any]:
         if task_id:
             record = self.get_task(task_id)
-            if record and str(record.get("outcome") or record.get("status")) in {
+            if record and self._has_v2_replay_source(record) and str(record.get("outcome") or record.get("status")) in {
                 "failed",
                 "skipped",
                 "cancelled",
@@ -684,9 +724,10 @@ class QueueAdmin:
                     **guard,
                 }
 
+        record: Dict[str, Any] | None = None
         if state == QueueState.dlq:
             record = self.get_task(task_id)
-            if record and str(record.get("outcome") or record.get("status")) in {
+            if record and self._has_v2_replay_source(record) and str(record.get("outcome") or record.get("status")) in {
                 "failed",
                 "skipped",
                 "cancelled",
@@ -722,6 +763,15 @@ class QueueAdmin:
                         moved = self._move_list_message(key, queue_name, raw_msg, new_msg)
                         if moved:
                             self._update_history(task_id, {"operational_message": 1})
+                            # 只有没有不可变 V2 outcome 的旧记录才恢复为 pending；
+                            # V2 terminal 记录必须保持不可变并走 replay 分支。
+                            if (
+                                state == QueueState.dlq
+                                and record
+                                and not record.get("outcome")
+                                and str(record.get("status") or "") in {"failed", "retry"}
+                            ):
+                                self._update_history(task_id, {"status": "pending"})
                         return {
                             "moved": int(moved),
                             "task_id": task_id,
@@ -1427,6 +1477,19 @@ class QueueAdmin:
         task_id = data.get("task_id")
         return str(task_id) if task_id else None
 
+    @staticmethod
+    def _has_v2_replay_source(record: Dict[str, Any] | None) -> bool:
+        """判断历史记录是否具备 V2 replay 所需的 action 和 payload descriptor。"""
+        if not record or not str(record.get("action") or ""):
+            return False
+        descriptor = record.get("payload_descriptor")
+        if isinstance(descriptor, str):
+            try:
+                descriptor = json.loads(descriptor)
+            except (json.JSONDecodeError, TypeError):
+                return False
+        return isinstance(descriptor, dict)
+
     def _smart_queue(self, queue_name: str) -> SmartQueue:
         namespace, short_name = self._split_queue_name(queue_name)
         return SmartQueue(
@@ -1465,7 +1528,7 @@ class QueueAdmin:
         end
         local outcome = redis.call('HGET', KEYS[1], 'outcome') or ''
         if outcome ~= '' and outcome ~= 'none' then return 0 end
-        redis.call('HSET', KEYS[1], 'operational_message', '1', 'updated_at', ARGV[1])
+        redis.call('HSET', KEYS[1], 'status', 'pending', 'operational_message', '1', 'updated_at', ARGV[1])
         redis.call('PERSIST', KEYS[1])
         redis.call('ZADD', KEYS[2], 'NX', ARGV[1], ARGV[2])
         return 1

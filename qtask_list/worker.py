@@ -97,6 +97,9 @@ class Worker:
         self._semaphore = threading.Semaphore(max_workers * 2) if max_workers > 1 else None
 
         self._shutdown_event = threading.Event()
+        # maintenance 线程只用该事件唤醒/退出；停止事件专门提供给 TaskContext，
+        # 不能因为维护线程轮询而清除，否则 handler 会丢失 stop_requested 信号。
+        self._maintenance_wakeup = threading.Event()
         self._draining = False
         self._active_claims: dict[str, TaskClaim] = {}
         self._active_claims_lock = threading.Lock()
@@ -370,10 +373,10 @@ class Worker:
                 logger.exception(f"Maintenance error: {exc}")
 
             stop_wait = min(60, self.maintenance_interval, self.heartbeat_interval)
-            if self._shutdown_event.wait(stop_wait):
-                if not self._draining:
+            if self._maintenance_wakeup.wait(stop_wait):
+                self._maintenance_wakeup.clear()
+                if not self.running and not self._draining:
                     break
-                self._shutdown_event.clear()
         logger.info("Maintenance thread stopped")
 
     def _poll_once(self) -> bool:
@@ -429,6 +432,7 @@ class Worker:
         """启动 Worker；优雅停止期间继续 heartbeat 和 lease 续租。"""
         self.running = True
         self._shutdown_event.clear()
+        self._maintenance_wakeup.clear()
         if threading.current_thread() is threading.main_thread():
             try:
                 signal.signal(signal.SIGINT, self._signal_handler)
@@ -451,17 +455,24 @@ class Worker:
             self._draining = self.executor is not None
             self.stop(reason="worker_loop_exit")
             if self._draining and self.executor is not None:
-                self._shutdown_event.clear()
                 self.executor.shutdown(wait=True)
                 self._draining = False
-                self._shutdown_event.set()
+                self._maintenance_wakeup.set()
             maintenance_thread.join(timeout=5)
             self._cleanup_worker_state()
 
     def stop(self, reason: str = "unknown") -> None:
         """请求 Worker 停止；TaskContext 会立即观察到 stop_requested。"""
         if not self.running:
+            # run() 的 finally 也可能在 worker_loop 已经观察到 running=False
+            # 时调用 stop；此时仍需唤醒 maintenance 并保持停止信号。
+            self._shutdown_event.set()
+            self._maintenance_wakeup.set()
             return
         logger.info(f"Worker 正在停止: {self.worker_id} reason={reason}")
         self.running = False
+        # executor 仍有活动任务时，maintenance 必须继续刷新 heartbeat/lease，直到 drain 完成。
+        if self.executor is not None:
+            self._draining = True
         self._shutdown_event.set()
+        self._maintenance_wakeup.set()

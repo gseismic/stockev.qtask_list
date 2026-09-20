@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import redis
@@ -50,22 +51,45 @@ def make_msg(task_id: str, payload: dict | None = None) -> str:
 
 
 def seed_expired_tasks(client, queue: str, count: int, prefix: str, status: str = "pending") -> list[str]:
+    """构造带 operational message 的 V2 deadline_missed 样本。"""
     now = time.time()
     task_ids = []
     pipe = client.pipeline()
     for index in range(count):
         task_id = f"{prefix}-{index:03d}"
         task_ids.append(task_id)
+        payload = {"action": "expired_action", "index": index}
+        descriptor = {"kind": "inline", "data": payload}
+        message = {
+            "version": 2,
+            "task_id": task_id,
+            "action": "expired_action",
+            "attempt": 0,
+            "max_attempts": 3,
+            "created_at": now - index,
+            "available_at": now,
+            "start_deadline_at": now - 10,
+            "payload": descriptor,
+        }
         pipe.hset(
             f"qtask:task:{task_id}",
             mapping={
                 "task_id": task_id,
                 "status": status,
+                "outcome": "",
                 "action": "expired_action",
                 "expires_at": str(now - 10),
-                "payload": json.dumps({"action": "expired_action", "index": index}),
+                "start_deadline_at": str(now - 10),
+                "created_at": str(now - index),
+                "updated_at": str(now),
+                "operational_message": "1",
+                "payload_kind": "inline",
+                "payload_descriptor": json.dumps(descriptor),
+                "max_attempts": "3",
+                "_queue": queue,
             },
         )
+        pipe.lpush(queue, json.dumps(message))
         pipe.zadd(f"qtask:hist:{queue}", {task_id: now - index})
     pipe.execute()
     return task_ids
@@ -134,7 +158,10 @@ def test_dashboard_bulk_retry_and_requeue_dlq(client, r):
     r.lpush(f"{queue}:dlq", make_msg("dlq-1"))
 
     retry = client.post(f"/api/queue/{queue}/retry")
-    dlq = client.post(f"/api/queue/{queue}/requeue-dlq", json={"task_id": None})
+    dlq = client.post(
+        f"/api/queue/{queue}/requeue-dlq",
+        json={"task_id": None, "confirm_bulk": True},
+    )
 
     assert retry.status_code == 200
     assert retry.json()["moved"] == 1
@@ -161,7 +188,7 @@ def test_dashboard_bulk_retry_updates_existing_history_without_orphans(client, r
     assert response.status_code == 200
     assert response.json()["moved"] == 2
     assert r.hget("qtask:task:retry-with-history", "status") == "pending"
-    assert r.ttl("qtask:task:retry-with-history") > 60
+    assert r.ttl("qtask:task:retry-with-history") == -1
     assert r.zscore(f"qtask:hist:{queue}", "retry-with-history") is not None
     assert r.exists("qtask:task:retry-missing-history") == 0
 
@@ -208,6 +235,51 @@ def test_dashboard_push_task(client, r):
     task_id = response.json()["task_id"]
     assert r.llen(queue) == 1
     assert r.exists(f"qtask:task:{task_id}") == 1
+
+
+def test_dashboard_retry_wait_stats_are_reported_from_injected_redis(client, r):
+    """V2 retry_wait 位于 delay ZSET，Dashboard 统计必须与注入客户端同库。"""
+    from qtask_list import SmartQueue
+
+    queue = "qtask_dash_test:retry-wait:fetch"
+    q = SmartQueue(
+        redis_client=r,
+        queue_name="retry-wait:fetch",
+        namespace="qtask_dash_test",
+        retry_backoff_base=0,
+    )
+    q.push({"action": "retryable"})
+    _payload, raw = q.pop(timeout=1)
+    assert q.fail(raw, "transient") is True
+
+    response = client.get(f"/api/queue/{queue}")
+    assert response.status_code == 200
+    stats = response.json()["stats"]
+    assert stats["retry_wait"] == 1
+    assert stats["retry"] == 0
+    assert stats["delay"] == 1
+
+
+def test_dashboard_push_invalid_task_returns_4xx(client, r):
+    """缺少 action 的用户输入应返回 422，而不是未处理异常导致 500。"""
+    queue = "qtask_dash_test:invalid:fetch"
+    response = client.post(f"/api/queue/{queue}/tasks", json={"payload": {}})
+    assert response.status_code == 422
+    assert "action" in response.json()["detail"]
+
+
+def test_dashboard_push_naive_datetime_returns_4xx(client, r):
+    """naive datetime 违反 TaskSpec 契约时由 REST 层返回可修复错误。"""
+    queue = "qtask_dash_test:naive-date:fetch"
+    response = client.post(
+        f"/api/queue/{queue}/tasks",
+        json={
+            "payload": {"action": "fetch"},
+            "scheduled_for": "2026-09-20T10:00:00",
+        },
+    )
+    assert response.status_code == 422
+    assert "timezone-aware" in response.json()["detail"]
 
 
 def test_dashboard_auth_disabled_by_default(client):
@@ -314,7 +386,7 @@ def test_dashboard_delete_queue(client, r):
     queues_before = client.get("/api/queues").json()
     assert any(q["name"] == queue for q in queues_before)
 
-    response = client.delete(f"/api/queue/{queue}")
+    response = client.delete(f"/api/queue/{queue}", params={"confirm": "true"})
     assert response.status_code == 200
     result = response.json()
     assert result["history_records"] == 1
@@ -406,18 +478,11 @@ def test_dashboard_push_with_expire(client, r):
 
 def test_dashboard_list_expired(client, r):
     """列出过期任务。"""
-    import time
     queue = "qtask_dash_test:expired:fetch"
     r.delete(queue)
     r.delete(f"qtask:hist:{queue}")
 
-    task_id = "exp-task-01"
-    now = time.time()
-    r.hset(f"qtask:task:{task_id}", mapping={
-        "task_id": task_id, "status": "pending", "action": "expired_action",
-        "expires_at": str(now - 10),
-    })
-    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+    task_id = seed_expired_tasks(r, queue, 1, "exp-task")[0]
 
     response = client.get(f"/api/queue/{queue}/expired")
     assert response.status_code == 200
@@ -453,28 +518,23 @@ def test_dashboard_list_expired_respects_limit_above_fifty(client, r):
 
 def test_dashboard_requeue_expired(client, r):
     """放回过期任务。"""
-    import time
     queue = "qtask_dash_test:expired:requeue"
     r.delete(queue)
     r.delete(f"qtask:hist:{queue}")
 
-    task_id = "exp-task-02"
-    now = time.time()
-    r.hset(f"qtask:task:{task_id}", mapping={
-        "task_id": task_id, "status": "pending", "action": "expired_action",
-        "expires_at": str(now - 10), "payload": json.dumps({"action": "expired_action"}),
-    })
-    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+    task_id = seed_expired_tasks(r, queue, 1, "exp-task")[0]
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
     response = client.post(
         f"/api/queue/{queue}/requeue-expired",
-        json={"task_id": task_id},
+        json={"task_id": task_id, "start_deadline_at": deadline},
     )
     assert response.status_code == 200
     assert response.json()["moved"] == 1
 
     record = r.hgetall(f"qtask:task:{task_id}")
-    assert record["status"] == "pending"
+    assert record["outcome"] == "cancelled"
+    assert response.json()["new_task_id"] != task_id
 
     r.delete(queue)
     r.delete(f"qtask:task:{task_id}")
@@ -482,33 +542,24 @@ def test_dashboard_requeue_expired(client, r):
 
 
 def test_dashboard_requeue_expired_ready_task_does_not_duplicate_or_lose_payload(client, r):
-    """ready 中的过期任务只清理过期标记，不应重复投递或丢 payload。"""
+    """ready 中的过期任务通过 cancel + replay 保留 payload 且只产生一个新实例。"""
     queue = "qtask_dash_test:expired:ready"
-    task_id = "exp-ready-01"
-    now = time.time()
-    payload = {"action": "expired_action", "symbol": "AAPL"}
-    r.lpush(queue, make_msg(task_id, payload))
-    r.hset(f"qtask:task:{task_id}", mapping={
-        "task_id": task_id,
-        "status": "pending",
-        "action": "expired_action",
-        "expires_at": str(now - 10),
-    })
-    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+    task_id = seed_expired_tasks(r, queue, 1, "exp-ready")[0]
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
     response = client.post(
         f"/api/queue/{queue}/requeue-expired",
-        json={"task_id": task_id},
+        json={"task_id": task_id, "start_deadline_at": deadline},
     )
 
     assert response.status_code == 200
     result = response.json()
-    assert result["moved"] == 0
-    assert result["updated"] == 1
+    assert result["moved"] == 1
+    assert result["new_task_id"] != task_id
     assert r.llen(queue) == 1
     raw = json.loads(r.lindex(queue, 0))
-    assert json.loads(raw["payload"]) == payload
-    assert r.hget(f"qtask:task:{task_id}", "expires_at") == ""
+    assert raw["payload"]["data"]["action"] == "expired_action"
+    assert r.hget(f"qtask:task:{task_id}", "outcome") == "cancelled"
 
 
 def test_dashboard_requeue_expired_without_payload_does_not_rebuild_lossy_task(client, r):
@@ -519,20 +570,25 @@ def test_dashboard_requeue_expired_without_payload_does_not_rebuild_lossy_task(c
     r.hset(f"qtask:task:{task_id}", mapping={
         "task_id": task_id,
         "status": "pending",
+        "outcome": "",
         "action": "expired_action",
         "expires_at": str(now - 10),
+        "start_deadline_at": str(now - 10),
+        "operational_message": "1",
+        "_queue": queue,
     })
     r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
     response = client.post(
         f"/api/queue/{queue}/requeue-expired",
-        json={"task_id": task_id},
+        json={"task_id": task_id, "start_deadline_at": deadline},
     )
 
     assert response.status_code == 200
     result = response.json()
     assert result["moved"] == 0
-    assert "payload" in result["note"]
+    assert "operational" in result["note"]
     assert r.llen(queue) == 0
     assert r.hget(f"qtask:task:{task_id}", "expires_at") != ""
 
@@ -542,33 +598,30 @@ def test_dashboard_requeue_expired_bulk_handles_more_than_fifty(client, r):
     queue = "qtask_dash_test:expired:bulk-requeue"
     task_ids = seed_expired_tasks(r, queue, 60, "exp-bulk", status="expired")
 
-    response = client.post(f"/api/queue/{queue}/requeue-expired", json={"task_id": None})
+    deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    response = client.post(
+        f"/api/queue/{queue}/requeue-expired",
+        json={"task_id": None, "start_deadline_at": deadline},
+    )
 
     assert response.status_code == 200
     assert response.json()["moved"] == 60
     assert r.llen(queue) == 60
-    assert all(r.hget(f"qtask:task:{task_id}", "status") == "pending" for task_id in task_ids)
+    assert all(r.hget(f"qtask:task:{task_id}", "outcome") == "cancelled" for task_id in task_ids)
 
     expired_again = client.get(f"/api/queue/{queue}/expired", params={"limit": 60})
     assert expired_again.status_code == 200
     assert expired_again.json()["count"] == 0
-    assert all(r.hget(f"qtask:task:{task_id}", "expires_at") == "" for task_id in task_ids)
+    assert all(r.hget(f"qtask:task:{task_id}", "start_deadline_at") != "" for task_id in task_ids)
 
 
 def test_dashboard_queue_stats_includes_expired(client, r):
     """queue_stats 包含 expired 计数。"""
-    import time
     queue = "qtask_dash_test:stats:expired"
     r.delete(queue)
     r.delete(f"qtask:hist:{queue}")
 
-    task_id = "exp-task-03"
-    now = time.time()
-    r.hset(f"qtask:task:{task_id}", mapping={
-        "task_id": task_id, "status": "pending", "action": "expired_action",
-        "expires_at": str(now - 10),
-    })
-    r.zadd(f"qtask:hist:{queue}", {task_id: now - 10})
+    task_id = seed_expired_tasks(r, queue, 1, "exp-stats")[0]
 
     response = client.get("/api/queues")
     assert response.status_code == 200

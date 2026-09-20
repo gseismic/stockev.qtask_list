@@ -9,7 +9,7 @@ description: qtask_list 分布式任务队列使用指南。当用户需要构�
 
 qtask_list 是基于 Redis List 的分布式任务队列，核心机制为 `BRPOPLPUSH` 可靠消费 + 多子队列状态管理。仅依赖 Redis，无需 RabbitMQ/Kafka。
 
-关键特性：可靠消费、自动重试、DLQ 死信队列、延迟任务、Crash Recovery、多级流水线、大 payload 外存、信号量背压、历史归档。
+关键特性：可靠消费、V2 退避重试、DLQ 死信队列、延迟任务、Crash Recovery、多级流水线、大 payload 外存、信号量背压、历史归档。新代码优先使用 `TaskSpec`/`enqueue()`；`push()` 是兼容接口。
 
 项目源码位于 `qtask_list/`，CLI 位于 `cli/`，Dashboard 位于 `dashboard/`，示例在 `examples/`。
 
@@ -55,9 +55,30 @@ task_id = q.push({"action": "fetch_stock", "symbol": "AAPL"})
 task_ids = q.push_batch([{"action": "fetch_stock", "symbol": "AAPL"}, ...])
 # 延迟 (60 秒后执行)
 task_id = q.push({"action": "send_email"}, delay_seconds=60)
-# 业务过期 (1 小时后仍未完成则进入 expired 视图)
+# 业务截止 (1 小时后仍未开始则进入 deadline_missed/expired 视图)
 task_id = q.push({"action": "expire_if_slow"}, expire_seconds=3600)
 ```
+
+V2 结构化投递：
+
+```python
+from datetime import datetime, timedelta, timezone
+from qtask_list import TaskSpec
+
+now = datetime.now(timezone.utc)
+result = q.enqueue(
+    TaskSpec(
+        action="fetch_quote",
+        payload={"symbol": "AAPL"},
+        logical_key="quote:AAPL:20260920T1310",
+        scheduled_for=now,
+        start_deadline_at=now + timedelta(minutes=7),
+        dedup_until=now + timedelta(days=2),
+    )
+)
+```
+
+身份、调度、截止时间均在信封和任务记录中维护，不要把 `_retry`、`expires_at` 等私有运行字段写进业务 payload。
 
 **消费端**：
 ```python
@@ -70,11 +91,11 @@ q.fail(raw_msg, "error reason")         # 失败，自动判断重试或入 DLQ
 **管理**：
 ```python
 q.recover()        # Crash recovery: processing → 主队列
-q.move_retry()     # retry → 主队列
+q.move_retry()     # 迁移 V1 retry List；V2 retry_wait 由 move_delay() 到点迁移
 q.move_delay()     # delay 到期 → 主队列 (Lua 原子操作)
-q.requeue_dlq()    # DLQ → 主队列
+q.requeue_dlq()    # V2 DLQ replay 创建新 task_id
 q.clear()          # 清空所有子队列
-q.get_stats()      # {"queue": N, "processing": N, "retry": N, "dlq": N, "delay": N}
+q.get_stats()      # 包含 queue/processing/retry/retry_wait/dlq/delay
 ```
 
 ### Worker（三线程任务处理器）
@@ -123,7 +144,7 @@ from qtask_list import QueueAdmin, QueueState
 admin = QueueAdmin("redis://localhost:6379/0")
 
 # 发现
-admin.list_queues()          # 返回 [{name, queue, processing, retry, dlq, delay, history, completed, failed, expired, active_workers, stale_workers}]
+admin.list_queues()          # 返回队列深度、retry_wait、outcome、deadline 和 Worker 统计
 admin.list_workers("stockev:fetch")  # Worker 信息列表
 
 # 读取任务
@@ -147,12 +168,17 @@ admin.diagnose("stockev:fetch")  # 返回 stats + suggestions
 admin.push_task("stockev:fetch", {"action": "test", "data": 1})
 admin.push_task("stockev:fetch", {"action": "test"}, delay_seconds=60)
 admin.push_task("stockev:fetch", {"action": "test"}, expire_seconds=3600)
-admin.move_retry("stockev:fetch")         # retry → ready
+admin.move_retry("stockev:fetch")         # 迁移旧 retry List → ready
 admin.requeue_dlq("stockev:fetch")        # dlq → ready（全部）
 admin.requeue_task("stockev:fetch", "<id>", from_state=QueueState.dlq)  # 单条
 admin.list_expired("stockev:fetch", limit=100)
-admin.requeue_expired("stockev:fetch")    # expired → ready（默认批量上限 500）
-admin.requeue_expired("stockev:fetch", task_id="<id>")  # 单条过期任务放回 ready
+admin.requeue_expired(
+    "stockev:fetch",
+    start_deadline_at="2026-09-21T16:00:00+00:00",
+)  # deadline_missed → 新实例（必须显式提供未来截止时间）
+admin.requeue_expired(
+    "stockev:fetch", task_id="<id>", start_deadline_at="2026-09-21T16:00:00+00:00"
+)
 admin.recover("stockev:fetch")            # 安全恢复（仅 stale worker）
 admin.recover("stockev:fetch", include_active=True)  # 强制恢复活跃 Worker
 admin.delete_task("<task_id>")
@@ -164,9 +190,9 @@ admin.clean_history("stockev:fetch", ttl_days=15)
 admin.clean_history(ttl_days=15)  # 全部队列
 ```
 
-**QueueState 枚举**：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `expired`, `all`
+**QueueState 枚举**：`ready`, `processing`, `retry`, `retry_wait`, `dlq`, `delay`, `history`, `completed`, `failed`, `skipped`, `cancelled`, `deadline_missed`, `expired`, `all`
 
-`expired` 表示业务任务过期：投递时通过 `expire_seconds` 写入 `expires_at`，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
+`expired` 是 `deadline_missed` 的兼容别名：`TaskSpec.start_deadline_at`（兼容 `expire_seconds`）控制最晚开始时间；`clean-history` / `clean_expired()` 只负责历史记录清理，二者不是同一件事。DLQ replay 创建新 task_id，原终态不会被重新打开。
 
 ### TaskHistory（Redis 任务历史）
 
@@ -174,7 +200,7 @@ admin.clean_history(ttl_days=15)  # 全部队列
 - `qtask:task:{task_id}` — Hash 存储任务详情
 - `qtask:hist:{queue_name}` — ZSET 时间戳索引
 
-TTL 默认 15 天，过期由 `clean_expired()` 按 ZSET 分批清理。同时兼容 Hash 和 String 格式。
+历史索引 ZSET 不设置 TTL；任务记录在终态且没有 operational message 后按 `ttl_days` 保留，`clean_expired()` 会跳过仍在运行中的任务。同时兼容 Hash 和 String 格式。
 
 ### RemoteStorage（大文件外存）
 
@@ -236,12 +262,12 @@ qtask clear stockev:fetch --include-history --force
 qtask requeue stockev:fetch --force              # 全部
 qtask requeue stockev:fetch --task-id <id> --force  # 单条
 
-# retry → ready
+# V1 retry List → ready（V2 retry_wait 自动到点迁移）
 qtask retry stockev:fetch
 
 # Crash recovery
 qtask recover stockev:fetch                     # 仅 stale worker
-qtask recover stockev:fetch --force-active      # 强制恢复活跃 Worker
+qtask recover stockev:fetch --force-active --yes # 强制恢复活跃 Worker（需要确认）
 
 # 历史
 qtask history stockev:fetch -l 50
@@ -283,12 +309,12 @@ start_dashboard(port=8765, redis_url="redis://localhost:6379/0")
 ```
 
 访问 `http://localhost:8765`，功能：
-- 队列状态一览（ready/processing/retry/dlq/delay/completed/failed/expired/history）
+- 队列状态一览（ready/processing/retry/retry_wait/dlq/delay/completed/failed/skipped/cancelled/deadline_missed/history）
 - 搜索 task_id、action、payload
 - 按创建时间和完成时间筛选任务
 - 任务详情和原始 JSON
 - 单任务重试、删除
-- 批量 drain retry、重放 DLQ、放回过期任务
+- 批量 drain 旧 retry List、重放 DLQ、按新截止时间 replay 错过截止的任务
 - 安全恢复 stale processing
 - 投递测试任务，支持 delay 和 expire_seconds
 - 删除队列及关联历史记录
@@ -345,9 +371,9 @@ def handle_fetch(task):
 | `{ns}:{name}` | List | 主队列（ready 任务） |
 | `{ns}:{name}:processing` | List | 默认 processing（兼容旧版） |
 | `{ns}:{name}:processing:{worker_id}` | List | Worker 专属 processing |
-| `{ns}:{name}:retry` | List | 重试队列（FIFO） |
+| `{ns}:{name}:retry` | List | V1 兼容重试队列；V2 重试进入 delay ZSET |
 | `{ns}:{name}:dlq` | List | 死信队列 |
-| `{ns}:{name}:delay` | Sorted Set | 延迟任务（时间戳为 score） |
+| `{ns}:{name}:delay` | Sorted Set | 延迟与 retry_wait（时间戳为 score） |
 | `{ns}:{name}:worker:{worker_id}` | String+TTL | Worker heartbeat |
 | `qtask:hist:{queue}` | ZSET | 历史索引 |
 | `qtask:task:{task_id}` | Hash | 任务详情 |
@@ -357,8 +383,8 @@ def handle_fetch(task):
 ```
 push() → [主队列] → pop(BRPOPLPUSH) → [processing]
                        ├── ack() → 删除 + 记录完成
-                       └── fail() → retry < max → [retry 队列] → move_retry() → [主队列]
-                                  └── retry >= max → [dlq 队列] → requeue_dlq() → [主队列]
+                       └── fail() → retry < max → [delay/retry_wait] → move_delay() → [主队列]
+                                  └── retry >= max → [dlq] → replay 新 task_id
 ```
 
 ## 配置参数
@@ -367,9 +393,10 @@ push() → [主队列] → pop(BRPOPLPUSH) → [processing]
 |------|--------|------|
 | `redis_url` | `redis://localhost:6379/0` | Redis 连接 |
 | `namespace` | `""` | 命名空间，多项目隔离 |
-| `max_retry` | `3` | 最大重试次数 |
+| `max_retry` | `3` | 兼容别名；最大总执行次数（含首次执行） |
 | `large_threshold` | `50KB` | 大 payload 阈值 |
 | `ttl_days` | `15` | 历史保留天数 |
+| `history_mode` | `full` | `full` 或 `minimal`；minimal 仍保留状态机正确性字段 |
 | `max_workers` | `1` | Worker 线程池并发数 |
 | `maintenance_interval` | `1800` (30min) | 维护线程间隔 |
 | `heartbeat_ttl` | `120` (2min) | Worker heartbeat TTL |
@@ -451,7 +478,7 @@ pipe.execute()
 2. **CLI 命令名**：安装后为 `qtask` 或 `qtask_list`，源码调试用 `python -m cli`
 3. **`recover()` 默认安全**：只恢复失联 Worker 的 processing，不会抢活跃 Worker 的任务。强制恢复需 `include_active=True`
 4. **`clear` 不含 history**：默认清队列不删历史，删历史需显式 `--include-history`
-5. **retry 队列用 `rpush`**（FIFO），主队列用 `lpush`（LIFO）。retry 移动回主队列时保持顺序
+5. **V2 重试在 delay ZSET**：`retry_wait` 由 `delay_reason=retry` 派生；`retry` List 只代表待迁移的旧消息，使用 `move_retry()` 兼容。
 6. **heartbeat TTL**：Worker 崩溃后需等 heartbeat 过期，`recover()` 才会处理
 7. **大 payload**：超过 50KB 自动走 RemoteStorage 客户端；服务端需安装 `qtask_list[storage]` 并启动 `qtask storage`
-8. **expired 与历史 TTL 不同**：`expire_seconds` 控制业务任务是否进入 expired 视图；`clean-history` 清理的是历史记录 TTL，不会代替过期任务放回
+8. **deadline 与历史 TTL 不同**：`start_deadline_at`/`expire_seconds` 控制任务是否进入 `deadline_missed`/`expired` 视图；`clean-history` 清理的是历史记录 TTL，不会代替过期任务 replay

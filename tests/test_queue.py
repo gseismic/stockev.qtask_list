@@ -1,6 +1,7 @@
 import pytest
 import redis
 import json
+import time
 from qtask_list import SmartQueue
 
 
@@ -48,7 +49,7 @@ class TestSmartQueue:
         assert r.llen("testns:batch_test") == 3
 
     def test_fail_and_retry(self, redis_url, r):
-        # retry_backoff_base=0 保留旧的立即重试（retry list）行为；默认走 delay 退避见 test_plan014
+        # V2 自动重试统一进入 delay ZSET；base=0 只表示立即到期，不再写入 retry List。
         q = SmartQueue(redis_url, "retry_test", namespace="testns", max_retry=2, retry_backoff_base=0)
         q.push({"action": "test"})
 
@@ -56,14 +57,18 @@ class TestSmartQueue:
         assert payload["action"] == "test"
         q.fail(raw, "test error")
 
-        # 失败后进入 retry 队列
-        assert r.llen("testns:retry_test:retry") == 1
-        retry_msg = r.lindex("testns:retry_test:retry", 0)
-        retry_payload = json.loads(json.loads(retry_msg)["payload"])
-        assert retry_payload["_retry"] == 1
+        # 失败后进入 retry_wait（delay ZSET），运行元数据不污染业务 payload。
+        assert r.zcard("testns:retry_test:delay") == 1
+        assert r.llen("testns:retry_test:retry") == 0
+        retry_msg = r.zrange("testns:retry_test:delay", 0, -1)[0]
+        retry_envelope = json.loads(retry_msg)
+        assert retry_envelope["attempt"] == 1
+        assert retry_envelope["delay_reason"] == "retry"
+        assert "_retry" not in retry_envelope["payload"]["data"]
+        assert q.get_stats()["retry_wait"] == 1
 
-        # move_retry 移回主队列
-        q.move_retry()
+        # move_delay 移回主队列
+        q.move_delay()
         assert r.llen("testns:retry_test") == 1
 
     def test_dlq(self, redis_url, r):
@@ -96,9 +101,9 @@ class TestSmartQueue:
         q = SmartQueue(redis_url, "ttl_test", namespace="testns", ttl_days=15)
         q.push({"action": "test"})
         
-        # 检查历史索引的 TTL
+        # V2 历史索引持久化，终态且无 operational message 后才清理。
         ttl = r.ttl("qtask:hist:testns:ttl_test")
-        assert ttl > 0
+        assert ttl == -1
 
     def test_history(self, redis_url, r):
         q = SmartQueue(redis_url, "history_test", namespace="testns")
@@ -111,13 +116,19 @@ class TestSmartQueue:
 
     def test_clean_expired(self, redis_url, r):
         q = SmartQueue(redis_url, "clean_test", namespace="testns")
-        q.push({"action": "test"})
-        
+        done_id = q.push({"action": "done"})
+        live_id = q.push({"action": "live"})
+        _payload, raw = q.pop(timeout=1)
+        assert q.ack(raw) is True
+        old = time.time() - 2 * 86400
+        r.zadd(q.history.idx_key, {live_id: old, done_id: old})
+        r.hset(f"qtask:task:{done_id}", "finished_at", old)
+
         count = q.history.clean_expired(ttl_seconds=0)
-        assert count >= 1
-        
+        assert count == 1
+
         history = q.history.list(limit=10)
-        assert len(history) == 0
+        assert [item["task_id"] for item in history] == [live_id]
 
     def test_ack_non_processing_message_does_not_create_history(self, redis_url, r):
         q = SmartQueue(redis_url, "ack_missing", namespace="testns")

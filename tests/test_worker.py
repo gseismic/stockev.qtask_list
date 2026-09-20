@@ -73,7 +73,7 @@ class TestWorker:
         assert r.llen("testns:result_out") == 1
 
     def test_worker_exception_handling(self, redis_url, r):
-        # retry_backoff_base=0 保留旧的立即重试行为（默认走 delay 退避）
+        # V2 异常自动进入 delay retry_wait，业务 payload 不增加 _retry 字段。
         q = SmartQueue(redis_url, "exception_test", namespace="testns", retry_backoff_base=0)
         
         q.push({"action": "error_task"})
@@ -92,8 +92,9 @@ class TestWorker:
         except ValueError:
             q.fail(raw, "ValueError")
         
-        # 任务进入 retry
-        assert r.llen("testns:exception_test:retry") == 1
+        # 任务进入 retry_wait
+        assert r.zcard("testns:exception_test:delay") == 1
+        assert r.llen("testns:exception_test:retry") == 0
 
     def test_worker_with_multiple_handlers(self, redis_url, r):
         worker = Worker(redis_url, "multi_test", namespace="testns")
@@ -158,12 +159,23 @@ class TestWorkerLifecycle:
 
     def test_worker_empty_payload_is_failed_not_left_processing(self, redis_url, r):
         worker = Worker(redis_url, "empty_payload", namespace="testns", max_retry=1)
-        worker.queue.push({})
-
-        worker._poll_once()
+        with pytest.raises(ValueError, match="action"):
+            worker.queue.push({})
 
         assert r.llen("testns:empty_payload:processing:" + worker.worker_id) == 0
-        assert r.llen("testns:empty_payload:dlq") == 1
+        assert r.llen("testns:empty_payload:dlq") == 0
+
+    def test_worker_stop_event_remains_set_during_drain(self, redis_url, r):
+        worker = Worker(redis_url, "drain_stop", namespace="testns", max_workers=2)
+        worker.running = True
+        worker._draining = False
+        worker.executor = object()
+
+        worker.stop(reason="test")
+
+        assert worker._shutdown_event.is_set()
+        assert worker._maintenance_wakeup.is_set()
+        assert worker._draining is True
 
     def test_worker_uses_worker_specific_processing_key(self, redis_url):
         worker = Worker(redis_url, "specific_processing", namespace="testns", worker_id="worker-a")

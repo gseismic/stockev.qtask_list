@@ -1,13 +1,13 @@
-"""
-Store Worker - 存储最终结果
-消费 stockev_list:store 队列，存储到数据库
-"""
+"""Store Worker：消费最终结果并写入幂等存储（示例用 stdout 代替数据库）。"""
+
+from pathlib import Path
 import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from qtask_list import Worker
+from qtask_list import TaskContext, Worker  # noqa: E402
 
 REDIS_URL = "redis://localhost:6379/0"
 STOCKEV_NS = "stockev_list"
@@ -20,7 +20,7 @@ worker = Worker(
 
 
 @worker.on("store_result")
-def store_result(task):
+def store_result(task: dict, context: TaskContext) -> None:
     symbol = task["symbol"]
     price = task["price"]
     volume = task["volume"]
@@ -28,7 +28,7 @@ def store_result(task):
     ma10 = task["ma10"]
     ma20 = task["ma20"]
     
-    print(f"[store] {symbol}: ${price} (vol: {volume:,})")
+    print(f"[store] task={context.task_id} {symbol}: ${price} (vol: {volume:,})")
     print(f"        MA5: ${ma5}, MA10: ${ma10}, MA20: ${ma20}")
     
     return None

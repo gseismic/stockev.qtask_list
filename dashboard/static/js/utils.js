@@ -30,6 +30,12 @@ export function liveCount(stats = {}) {
         + Number(stats.delay || 0);
 }
 
+// retry_wait 是 V2 delay ZSET 中的自动重试；retry 仅保留 V1 retry List。
+// 两者都属于“等待重试”展示口径，但 delay 已经计入 liveCount，不能重复相加。
+export function retryFamilyCount(stats = {}) {
+    return Number(stats.retry || 0) + Number(stats.retry_wait || 0);
+}
+
 export function queueActivityCount(queue = {}) {
     return liveCount(queue) + Number(queue.active_workers || 0) + Number(queue.stale_workers || 0);
 }
@@ -40,17 +46,18 @@ export function stateCount(stats = {}, state = "all") {
     if (state === "completed") return Number(stats.completed || 0);
     if (state === "failed") return Number(stats.failed || 0);
     if (state === "deadline_missed") return Number(stats.deadline_missed || 0);
-    // V2 的 retry_wait 与旧 retry List 共用同一"重试家族"计数展示。
-    if (state === "retry_wait") return Number(stats.retry_wait ?? stats.retry ?? 0);
+    // V2 的 retry_wait 与旧 retry List 共用同一“重试家族”计数展示。
+    if (state === "retry_wait") return retryFamilyCount(stats);
     return Number(stats[state] || 0);
 }
 
 export function queuePriority(queue = {}) {
     const ready = Number(queue.queue || 0);
     const processing = Number(queue.processing || 0);
-    const retry = Number(queue.retry || 0);
+    const retry = retryFamilyCount(queue);
     const dlq = Number(queue.dlq || 0);
-    const delay = Number(queue.delay || 0);
+    // retry_wait 物理上属于 delay，优先级统计时从普通 delay 中扣除，避免重复计数。
+    const delay = Math.max(0, Number(queue.delay || 0) - Number(queue.retry_wait || 0));
     const failed = Number(queue.failed || 0);
     const activeWorkers = Number(queue.active_workers || 0);
     const staleWorkers = Number(queue.stale_workers || 0);
@@ -90,12 +97,13 @@ export function primaryQueueIssue(stats = {}) {
             next: "建议先切到死信状态查看样本。",
         };
     }
-    if (Number(stats.retry || 0) > 0) {
+    const retry = retryFamilyCount(stats);
+    if (retry > 0) {
         return {
             tone: "warning",
-            title: `有 ${stats.retry} 个任务等待重试`,
-            detail: "这些任务已经失败过但尚未进入死信，可手动移回待处理队列。",
-            next: "确认失败原因后执行重试队列。",
+            title: `有 ${retry} 个任务等待重试`,
+            detail: "这些任务已经失败过但尚未进入死信；V2 retry_wait 会在到点后自动重试。",
+            next: "确认失败原因；如有旧 retry List，再执行重试队列。",
         };
     }
     if (Number(stats.stale_workers || 0) > 0) {

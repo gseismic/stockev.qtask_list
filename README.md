@@ -6,7 +6,7 @@
 
 - **可靠消费**：`BRPOPLPUSH` 原子操作，Worker 崩溃不丢任务
 - **重试退避**：失败按指数退避（30s 起步，±10% 抖动）写入延迟队列，不再瞬时烧光重试次数
-- **业务去重**：`logical_key` 身份键（SETNX+TTL），动态列表重复投递零成本防重
+- **业务去重**：`logical_key` 由哈希化 live owner 持有；在途任务不靠普通 TTL，终态按 `dedup_until` 精确保留
 - **执行截止**：`expire_seconds` 写入消息信封，pop 时强制检查，过期任务跳过不执行（历史标记 `skipped`）
 - **延迟任务**：基于 Redis Sorted Set 的定时任务，Lua 脚本原子迁移（单次批量上限 500）
 - **Crash Recovery**：Worker 意外退出后自动恢复 processing 中的任务；维护线程周期性接手失联 Worker 的任务
@@ -50,7 +50,7 @@ pip install -e ".[storage]"       # RemoteStorage 服务端支持
 
 | 文件 | 类 | 职责 |
 |------|-----|------|
-| `queue.py` | `SmartQueue` | 队列 CRUD，5 子队列管理，push/pop/ack/fail/recover/move_delay/move_retry |
+| `queue.py` | `SmartQueue` | 队列 CRUD，ready/processing/dlq/delay 管理，兼容旧 retry List |
 | `worker.py` | `Worker` | 三线程模型（主循环 + 维护线程 + 线程池），handler 路由，并发处理 |
 | `history.py` | `TaskHistory` | Redis ZSET + Hash 存储任务生命周期，TTL 自动过期清理 |
 | `storage.py` | `RemoteStorage` | HTTP 客户端，大于 50KB 的 payload 自动外存 |
@@ -67,9 +67,9 @@ pip install -e ".[storage]"       # RemoteStorage 服务端支持
 | `{ns}:{name}` | List | 主队列，待消费任务 |
 | `{ns}:{name}:processing` | List | 默认 processing 队列（SmartQueue 直接使用 / 兼容旧版本） |
 | `{ns}:{name}:processing:{worker_id}` | List | Worker 专属 processing 队列，避免多 Worker 启动时误恢复活跃任务 |
-| `{ns}:{name}:retry` | List | 重试队列（失败但未达 max_retry） |
+| `{ns}:{name}:retry` | List | V1 兼容重试队列；V2 新重试统一写入 delay ZSET |
 | `{ns}:{name}:dlq` | List | 死信队列（重试耗尽） |
-| `{ns}:{name}:delay` | Sorted Set | 延迟队列（按时间戳排序，Lua 脚本原子迁移） |
+| `{ns}:{name}:delay` | Sorted Set | 延迟与 `retry_wait` 队列（按时间戳排序，Lua 脚本原子迁移） |
 | `{ns}:{name}:worker:{worker_id}` | String + TTL | Worker heartbeat，用于判断 processing 是否已失联 |
 
 ### 任务生命周期
@@ -84,12 +84,12 @@ push() ──▶ [主队列] ──▶ pop(BRPOPLPUSH) ──▶ [processing]
                │                                            │
                │                                  ┌─────────┴─────────┐
                │                                  ▼                   ▼
-               │                            [retry 队列]         [dlq 队列]
-               │                          retry < max_retry    retry >= max_retry
+               │                         [delay/retry_wait]       [dlq 队列]
+               │                          到点 move_delay()       retry >= max_retry
                │                                  │
-               │                            move_retry()
-               │                                  │
-               └──────────────────────────────────┘
+               │                                  └────────────────────┘
+               │
+               └─ V1 retry List 由 move_retry() 迁移（仅兼容旧消息）
 ```
 
 ## 核心模块详解
@@ -136,6 +136,29 @@ task_ids = q.push_batch(
 )
 ```
 
+新代码建议使用结构化的 `TaskSpec`，将业务 payload 与调度/身份元数据分开：
+
+```python
+from datetime import datetime, timedelta, timezone
+from qtask_list import TaskSpec
+
+now = datetime.now(timezone.utc)
+result = q.enqueue(
+    TaskSpec(
+        action="fetch_quote",
+        payload={"symbol": "AAPL"},
+        logical_key="quote:AAPL:20260920T1310",
+        scheduled_for=now,
+        start_deadline_at=now + timedelta(minutes=7),
+        dedup_until=now + timedelta(days=2),
+    )
+)
+if result.accepted:
+    print(result.task_id)
+```
+
+`TaskSpec` 的 `scheduled_for`、`not_before_at`、`start_deadline_at` 和 `dedup_until` 必须使用带时区的 `datetime`。旧 `push()`/`push_batch()` 仍可使用，但会发出兼容层弃用提醒。
+
 **消费端 API：**
 
 ```python
@@ -154,18 +177,18 @@ q.fail(raw_msg, "error reason")   # 标记失败，自动判断重试或入 DLQ
 
 ```python
 q.recover()        # Crash recovery: processing → 主队列
-q.move_retry()     # retry 队列 → 主队列（仅 retry_backoff_base=0 的旧路径使用）
+q.move_retry()     # 迁移 V1 retry List；V2 retry_wait 由 move_delay() 到点迁移
 q.move_delay()     # delay 到期 → 主队列 (Lua 原子操作，单次最多 500 条)
-q.requeue_dlq()    # DLQ → 主队列，默认重置重试计数（reset_retry=True）
+q.requeue_dlq()    # DLQ replay 为新 task_id；V1 无 V2 描述时才原地兼容迁移
 q.clear()          # 清空所有子队列
-q.get_stats()      # 返回 {"queue": N, "processing": N, "retry": N, "dlq": N, "delay": N}
+q.get_stats()      # 返回 queue/processing/retry/retry_wait/dlq/delay 等计数
 ```
 
 **关键设计决策：**
 
 - `pop()` 使用 `BRPOPLPUSH`（非 `BLPOP`），取任务的同时推入 `processing` 队列。Worker 使用带 heartbeat 的专属 processing key，只自动恢复已失联 Worker 的任务。
-- 重试退避：`fail()` 未耗尽重试次数时按 `retry_backoff_base * 2^(retry-1)`（±10% 抖动，上限 `retry_backoff_max`）写入 delay ZSET，到点由 `move_delay()` 迁回主队列。`retry_backoff_base=0` 恢复旧的立即重试行为。带退避的重试任务在 delay 视图可见（payload 携带 `_retry`），历史状态为 `retry`。
-- 执行截止：`expire_seconds` 写入消息信封 `expires_at`，pop 时强制检查；过期任务直接丢弃并标记历史 `skipped`，不进 DLQ（重放也无意义）。旧格式消息无此字段则不强制。
+- 重试退避：`fail()` 未耗尽重试次数时按 `retry_backoff_base * 2^(attempt-1)`（±10% 抖动，上限 `retry_backoff_max`）写入 delay ZSET，到点由 `move_delay()` 迁回主队列。`QueueAdmin.queue_stats()` 的 `retry_wait` 统计该 ZSET 中 `delay_reason=retry` 的任务；V1 retry List 仅由 `move_retry()` 兼容迁移。运行次数在信封头和任务记录的 `attempt` 中维护，不再污染业务 payload。
+- 执行截止：`TaskSpec.start_deadline_at`（兼容 `push(expire_seconds=...)`）写入任务记录并同步写入 V2 信封；pop/begin-attempt 强制检查，过期任务标记 `skipped`/`deadline_missed`，不进入 DLQ。旧 V1 `expires_at` 仍可读取。
 - `move_delay()` 使用 Redis **Lua 脚本**，原子地将到期任务从 ZSET 迁移到主队列，单次调用最多迁移 500 条，避免同一秒大量任务到期时阻塞 Redis。
 - 大 payload 自动外存：push 时超过 `large_threshold` 则上传到 `RemoteStorage`，队列中仅存引用。消费端未配置 storage 时显式报错进 DLQ（配置错误）；storage 瞬时不可用时任务移入 delay 稍后重试，不进 DLQ。
 
@@ -240,7 +263,10 @@ admin.push_task("stockev:day-kline:fetch", {"action": "test"}, expire_seconds=36
 admin.requeue_task("stockev:day-kline:fetch", "<task_id>", from_state="dlq")
 admin.requeue_dlq("stockev:day-kline:fetch")
 admin.list_expired("stockev:day-kline:fetch", limit=100)
-admin.requeue_expired("stockev:day-kline:fetch")
+admin.requeue_expired(
+    "stockev:day-kline:fetch",
+    start_deadline_at="2026-09-21T16:00:00+00:00",  # 必须是未来时刻
+)
 admin.move_retry("stockev:day-kline:fetch")
 admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
 
@@ -252,13 +278,13 @@ admin.delete_queue("stockev:day-kline:fetch")  # 删除整条队列及历史，�
 admin.diagnose("stockev:day-kline:fetch")
 ```
 
-`QueueState` 用户可见状态：`ready`, `processing`, `retry`, `dlq`, `delay`, `history`, `completed`, `failed`, `skipped`, `expired`, `all`。
+`QueueState` 用户可见状态：`ready`, `processing`, `retry`, `retry_wait`, `dlq`, `delay`, `history`, `completed`, `failed`, `skipped`, `cancelled`, `deadline_missed`, `expired`, `all`。其中 `retry` 是旧 List 兼容视图，V2 正在等待退避的任务位于 `retry_wait`。
 
-`expired` 表示业务任务过期：投递时通过 `expire_seconds` 写入 `expires_at`，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
+`expired` 是 `deadline_missed` 的兼容别名：投递时通过 `TaskSpec.start_deadline_at`（或兼容参数 `expire_seconds`）设定最晚开始时间，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
 
-`skipped` 表示任务在 pop 时已过执行截止（`expires_at`），被跳过未执行——与 `expired` 视图（历史标记角度）配合使用。
+`skipped` 表示任务在 begin-attempt 时已过 `start_deadline_at`，被跳过未执行；`cancelled` 表示被 supersede 或管理操作取消。
 
-DLQ 重放（`admin.requeue_dlq` / `qtask requeue`）默认剥离消息中的 `_retry` 计数：人工重放视为全新尝试，可完整走完重试预算；保留原计数请传 `reset_retry=False`（CLI `--keep-retry`）。从活跃 Worker 的 processing 重放会被拒绝，需先执行 recover。
+DLQ 重放（`admin.requeue_dlq` / `qtask requeue`）创建新的 `task_id`，原失败记录保持不变，并通过 `replay_of` / `replayed_by` 保留血缘；新实例从 `attempt=0` 开始。`reset_retry` 与 CLI `--keep-retry` 仅为兼容参数，V2 replay 不会复活原终态。从活跃 Worker 的 processing 重放会被拒绝，需先执行 recover。
 
 ### TaskHistory — 任务历史
 
@@ -270,7 +296,7 @@ Redis Key 结构:
   qtask:hist:{queue_name}  → ZSET   (时间戳索引 task_id)
 ```
 
-- 每条记录和索引均设 `expire`（默认 15 天），过期由 `clean_expired()` 按 ZSET 分批清理。
+- 历史索引 ZSET 不设置 TTL；任务记录只在进入终态且不再有 operational message 后按 `ttl_days` 设置 TTL。`clean_expired()` 会跳过仍在 ready/processing/delay/DLQ 中的任务。
 - 同时兼容 Hash 和 String 两种存储格式，保证向后兼容。
 
 ### RemoteStorage — 大文件外存
@@ -322,19 +348,19 @@ logical_key = 任务类型 : 业务主体 : 数据时间桶
 ```
 
 - **显式声明**：身份键由调用方传入，库不做 payload 自动哈希（URL 带时间戳/query 参数会让自动哈希失效）。
-- **时间桶编进键**：跨期天然是新键，同桶重推被去重。dedup 键的 TTL 只做垃圾清理（默认 86400s，或 `expire_seconds*2`），不承担窗口语义。
-- **失败自愈**：进 DLQ 的死任务只占住自己的时间桶（靠 TTL 过期），下一个时间桶是新键，调度下一轮自动恢复，不会被卡住。
+- **时间桶编进键**：跨期天然是新键，同桶重推被去重。live owner 不设置普通 TTL；终态 owner 按 `dedup_until` 精确保留，过期后 compare-and-delete。
+- **失败自愈**：进 DLQ 的任务是 failed outcome + dlq location；重放会创建新 task_id，原任务不会被重新打开。下一个时间桶仍是新身份，调度下一轮不会被卡住。
 
 各场景键模板与执行截止策略：
 
-| 任务类型 | logical_key 示例 | 时间桶 | expire_seconds（执行截止） |
+| 任务类型 | logical_key 示例 | 时间桶 | start_deadline_at（执行截止） |
 |---|---|---|---|
 | 日 K 线 | `kline:AAPL:1d:2026-09-19` | 交易日 | 无或 7 天（回补合法） |
 | 5min 行情快照 | `quote:AAPL:20260920T1310` | 采样周期 | 桶结束 + 容忍度（如 420s） |
 | 股票列表发现 | `universe:20260920-am` | 固定窗口（如 4h） | 下个桶开始前 |
 | 新闻抓取 | `news:sha256(url)` | 条目即身份 | 无或数天 |
 
-三个生命周期不要混淆：dedup 键 TTL（垃圾清理）、`expire_seconds`（执行截止，pop 强制检查）、`ttl_days`（历史保留）。
+三个生命周期不要混淆：live identity（在途所有权）、`start_deadline_at`/`expire_seconds`（最晚开始时间）、`dedup_until`（终态身份保留）、`ttl_days`（历史记录保留）。
 
 同一 `logical_key` 建议同时作为数据库唯一约束（如 kline 表 symbol+period+trade_date）：队列挡投递、唯一键挡落库，两层一个身份。
 
@@ -347,20 +373,27 @@ logical_key = 任务类型 : 业务主体 : 数据时间桶
 
 ## 定时抓取部署模式（场景示例）
 
-定时抓取推荐**外置 cron + logical_key 去重**，而不是在 handler 里自我续期（失败进 DLQ 会断链，re-push 与 ack 之间的崩溃会分裂周期链）：
+定时抓取推荐**外置 cron + logical_key 去重**，而不是在 handler 里自我续期（失败进 DLQ 会断链，re-push 与 ack 之间的崩溃会分裂周期链）。可直接运行的确定性 5 分钟 slot 示例见 `examples/stockev/scheduler.py`：
 
 ```python
 # scheduler.py — 由 crontab / systemd timer 每 5 分钟调用
-from qtask_list import SmartQueue
+from datetime import datetime, timedelta, timezone
+from qtask_list import SmartQueue, TaskSpec
 
 q = SmartQueue("redis://localhost:6379/0", "quote", namespace="stockev")
 
-bucket = time.strftime("%Y%m%dT%H%M")  # 5min 时间桶编进身份键
+now = datetime.now(timezone.utc)
+slot = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+bucket = slot.strftime("%Y%m%dT%H%M")  # 确定性 5min 时间桶
 for symbol in watchlist():
-    q.push(
-        {"action": "fetch_quote", "symbol": symbol},
-        logical_key=f"quote:{symbol}:{bucket}",
-        expire_seconds=420,  # 桶结束 + 容忍度，过期的快照不落地
+    q.enqueue(
+        TaskSpec(
+            action="fetch_quote",
+            payload={"symbol": symbol},
+            scheduled_for=slot,
+            start_deadline_at=slot + timedelta(minutes=7),
+            logical_key=f"quote:{symbol}:{bucket}",
+        )
     )
 ```
 
@@ -461,12 +494,12 @@ qtask clear stockev_list:fetch --include-history --force
 qtask requeue stockev_list:fetch --force
 qtask requeue stockev_list:fetch --task-id <task_id> --force
 
-# retry 队列 → 主队列
+# V1 retry List → 主队列（V2 retry_wait 由维护线程自动到点迁移）
 qtask retry stockev_list:fetch
 
 # Crash recovery：默认只恢复 stale worker 的 processing，避免抢活跃 Worker 任务
 qtask recover stockev_list:fetch
-qtask recover stockev_list:fetch --force-active
+qtask recover stockev_list:fetch --force-active --yes
 
 # 查看历史
 qtask history stockev_list:fetch
@@ -500,12 +533,12 @@ qtask dashboard
 
 Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localhost:8765`。页面支持：
 
-- 按队列查看 ready/processing/retry/dlq/delay/completed/failed/expired/history。
+- 按队列查看 ready/processing/retry/retry_wait/dlq/delay/completed/failed/skipped/cancelled/deadline_missed/history。
 - 搜索 task_id、action、payload。
 - 按创建时间和完成时间筛选任务。
 - 查看任务详情和原始 JSON。
 - 单任务重试、删除。
-- 批量 drain retry、重放 DLQ、放回过期任务。
+- 批量 drain 旧 retry List、重放 DLQ、按新截止时间 replay 错过截止的任务。
 - 安全恢复 stale processing；强制恢复 active processing 需要显式确认。
 - 投递测试任务，支持 delay 和 expire_seconds。
 - 删除队列及关联历史记录。
@@ -543,7 +576,8 @@ qtask dashboard --host 0.0.0.0 --no-open
 | `retry_backoff_max` | `3600` | 单次重试退避上限（秒） |
 | `large_threshold` | `50KB` | 大 payload 阈值，超限走 RemoteStorage |
 | `ttl_days` | `15` | 历史记录保留天数 |
-| `record_history` | `True` | 是否写任务历史（高频低价值队列可关闭省内存） |
+| `record_history` | `True` | 兼容参数；`False` 映射为 `history_mode=minimal`，仍保留状态机所需的最小任务记录 |
+| `history_mode` | `full` | `full` 保留完整审计字段，`minimal` 仍保留 outcome/location/attempt/deadline 等正确性字段 |
 | `max_workers` | `1` | Worker 线程池并发数 |
 | `maintenance_interval` | `1800` (30min) | 维护线程执行间隔（归档+健康检查） |
 | `stale_recover_interval` | `300` | 维护线程接手失联 Worker 任务的间隔（秒） |

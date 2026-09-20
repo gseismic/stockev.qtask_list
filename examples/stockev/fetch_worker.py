@@ -1,15 +1,16 @@
-"""
-Fetch Worker - 爬取股票数据
-消费 stockev_list:fetch 队列，推送到 finance:calculate 队列
-"""
-import sys
-import os
-import time
+"""Fetch Worker：消费行情任务并以 TaskSpec 发往计算阶段。"""
+
+from datetime import datetime, timezone
+from pathlib import Path
 import random
+import sys
+import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from qtask_list import Worker, SmartQueue
+from qtask_list import SmartQueue, TaskContext, TaskResult, TaskSpec, Worker  # noqa: E402
 
 REDIS_URL = "redis://localhost:6379/0"
 STOCKEV_NS = "stockev_list"
@@ -27,7 +28,7 @@ worker = Worker(
 
 
 @worker.on("fetch_stock")
-def fetch_stock(task):
+def fetch_stock(task: dict, context: TaskContext) -> TaskResult:
     symbol = task["symbol"]
     url = task["url"]
     
@@ -38,13 +39,24 @@ def fetch_stock(task):
     price = round(random.uniform(50, 500), 2)
     volume = random.randint(1000000, 100000000)
     
-    return {
-        "action": "calculate_ma",
-        "symbol": symbol,
-        "price": price,
-        "volume": volume,
-        "timestamp": time.time(),
-    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+    return TaskResult(
+        value={"symbol": symbol, "price": price, "volume": volume},
+        emissions=(
+            TaskSpec(
+                action="calculate_ma",
+                payload={
+                    "symbol": symbol,
+                    "price": price,
+                    "volume": volume,
+                    "timestamp": timestamp,
+                },
+                logical_key=f"calculate:{context.task_id}",
+                parent_task_id=context.task_id,
+                trace_id=context.trace_id,
+            ),
+        ),
+    )
 
 
 if __name__ == "__main__":
