@@ -40,6 +40,8 @@ export function stateCount(stats = {}, state = "all") {
     if (state === "completed") return Number(stats.completed || 0);
     if (state === "failed") return Number(stats.failed || 0);
     if (state === "deadline_missed") return Number(stats.deadline_missed || 0);
+    // V2 的 retry_wait 与旧 retry List 共用同一"重试家族"计数展示。
+    if (state === "retry_wait") return Number(stats.retry || 0);
     return Number(stats[state] || 0);
 }
 
@@ -138,6 +140,36 @@ export function taskState(task) {
     return task._state || task.status || "ready";
 }
 
+export function taskOutcome(task) {
+    return task.outcome || task.status || "";
+}
+
+// 任务失败原因：V2 列表行把信封头放在 _raw，历史行直接带 reason 字段。
+export function taskFailure(task) {
+    const raw = task._raw || {};
+    const lastError = task.last_error || raw.last_error;
+    const reasonCode = task.reason_code || raw.reason_code || "";
+    const reason = task.reason || raw.reason || "";
+    if (lastError && typeof lastError === "object" && (lastError.reason || lastError.code)) {
+        return { code: lastError.code || reasonCode, reason: lastError.reason || reason };
+    }
+    if (reasonCode || reason) return { code: reasonCode, reason };
+    return null;
+}
+
+// V2 历史行不含业务 payload，operational 行对 zstd/external 只给 descriptor；
+// 这里统一还原出可读 payload，供表格和抽屉共用。
+export function descriptorPayload(task) {
+    const source = task.payload && typeof task.payload === "object" && "kind" in task.payload
+        ? task.payload
+        : task.payload_descriptor;
+    if (!source || typeof source !== "object" || !("kind" in source)) return task.payload ?? null;
+    if (source.kind === "inline") return source.data ?? task.payload ?? null;
+    if (source.kind === "zstd") return { _compressed: true, size: source.size };
+    if (source.kind === "external") return { _large: true, key: source.key, size: source.size };
+    return task.payload ?? null;
+}
+
 export function shortId(taskId) {
     if (!taskId) return "-";
     return taskId.length > 12 ? `${taskId.slice(0, 12)}...` : taskId;
@@ -180,7 +212,9 @@ export function formatTime(timestamp) {
 
 export function canRequeue(task) {
     const outcome = task.outcome || task.status;
-    return ["retry", "retry_wait", "dlq", "delay", "processing", "deadline_missed"].includes(taskState(task))
+    // retry_wait 的任务仍在 delay ZSET 里按计划等待，后台不支持手动提前，
+    // 手动移动会返回 moved=0；这里不提供入口。
+    return ["retry", "dlq", "delay", "processing", "deadline_missed"].includes(taskState(task))
         || ["failed", "skipped", "cancelled"].includes(outcome);
 }
 

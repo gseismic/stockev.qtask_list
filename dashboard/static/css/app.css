@@ -394,6 +394,36 @@ button {
     border-radius: 6px;
 }
 
+.failure-block {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 8px;
+}
+
+.failure-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #b91c1c;
+}
+
+.failure-title code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #fee2e2;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.failure-reason {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #7f1d1d;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .panel {
     background: var(--panel);
     border: 1px solid var(--line);

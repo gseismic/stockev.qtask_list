@@ -1,6 +1,7 @@
 import {
     canRequeue,
     compareQueues,
+    descriptorPayload,
     extractNamespace,
     extractNamespaces,
     formatTime,
@@ -14,6 +15,8 @@ import {
     stateLabel,
     states,
     summarize,
+    taskFailure,
+    taskOutcome,
     taskState,
 } from "./utils.js";
 
@@ -127,6 +130,15 @@ export function QueueList({ queues, selectedQueue, query, showCurrentOnly, names
                     h("div", { className: "queue-outcome", key: "outcome" }, [
                         h("span", { className: "outcome-ok", key: "ok" }, `✓ ${completed}`),
                         h("span", { className: `outcome-fail ${failed > 0 ? "has-fail" : ""}`, key: "fail" }, `✗ ${failed}`),
+                        Number(queue.cancelled || 0) > 0
+                            ? h("span", { className: "muted", key: "cancelled" }, `⊘ ${queue.cancelled}`)
+                            : null,
+                        Number(queue.skipped || 0) > 0
+                            ? h("span", { className: "muted", key: "skipped" }, `↷ ${queue.skipped}`)
+                            : null,
+                        Number(queue.deadline_missed || 0) > 0
+                            ? h("span", { className: "outcome-fail has-fail", key: "missed" }, `⏰ ${queue.deadline_missed}`)
+                            : null,
                     ]),
                 ]);
             }) : h("div", { className: "empty compact" }, "没有队列")
@@ -415,7 +427,7 @@ export function TaskTable({ tasks, state, stats, search, readOnly, loading, onVi
                     ])),
                     h("td", {}, h(Badge, { state })),
                     h("td", {}, task.action || "-"),
-                    h("td", { className: "payload-cell" }, summarize(task.payload ?? task)),
+                    h("td", { className: "payload-cell" }, summarize(descriptorPayload(task))),
                     h("td", { className: "muted" }, formatTime(task.created_at)),
                     h("td", { className: "muted" }, ["completed", "failed", "skipped", "cancelled"].includes(task.status || task.outcome) ? formatTime(task.updated_at || task.finished_at) : "-"),
                 ]);
@@ -455,9 +467,12 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
         setResolvedPayload(null);
         setPayloadNote("");
         if (!task || !onLoadPayload) return;
-        const payload = task.payload;
-        const isRef = payload && typeof payload === "object" && (payload._large || payload._compressed);
-        if (!isRef) return;
+        const payload = descriptorPayload(task);
+        // 需要走 resolve API 的情形：payload 缺失（V2 历史）或 payload 是压缩/外存引用。
+        const isRef = payload && typeof payload === "object"
+            && (payload._large || payload._compressed);
+        const isMissing = payload === null || payload === undefined;
+        if (!isRef && !isMissing) return;
 
         setPayloadLoading(true);
         onLoadPayload(task).then((result) => {
@@ -472,9 +487,35 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
 
     if (!task) return null;
     const state = taskState(task);
+    const failure = taskFailure(task);
     const isBusy = !!loading;
 
-    const userFields = ["task_id", "action", "status", "payload", "created_at", "updated_at", "run_at"];
+    // 用户可读的核心字段；其余运行时字段继续留在「内部元数据」。
+    const userFields = [
+        "task_id",
+        "action",
+        "status",
+        "outcome",
+        "attempt",
+        "max_attempts",
+        "reason_code",
+        "reason",
+        "logical_key",
+        "scheduled_for",
+        "start_deadline_at",
+        "dedup_until",
+        "trace_id",
+        "parent_task_id",
+        "replay_of",
+        "replayed_by",
+        "concurrency_key",
+        "supersede_key",
+        "supersede_version",
+        "created_at",
+        "updated_at",
+        "finished_at",
+        "result",
+    ];
     const userData = {};
     const metaData = {};
     for (const [key, value] of Object.entries(task)) {
@@ -484,9 +525,15 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
             metaData[key] = value;
         }
     }
+    if (failure) {
+        userData.last_error_code = failure.code;
+        userData.last_error_reason = failure.reason;
+    }
 
-    const displayPayload = resolvedPayload !== null ? resolvedPayload : task.payload;
-    const isRefPayload = task.payload && typeof task.payload === "object" && (task.payload._large || task.payload._compressed);
+    const displayPayload = resolvedPayload !== null ? resolvedPayload : descriptorPayload(task);
+    const payloadIsRef = displayPayload && typeof displayPayload === "object"
+        && (displayPayload._large || displayPayload._compressed);
+    const payloadMissing = displayPayload === null || displayPayload === undefined;
 
     return h(React.Fragment, {}, [
         h("div", { className: "drawer-backdrop", onClick: onClose, key: "backdrop" }),
@@ -513,11 +560,23 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
                         key: "delete",
                     }, "删除") : null,
                 ]),
+                failure ? h("div", { className: "failure-block", key: "failure" }, [
+                    h("div", { className: "failure-title", key: "title" }, [
+                        "失败原因 ",
+                        h("code", { key: "code" }, failure.code || "unknown"),
+                    ]),
+                    failure.reason
+                        ? h("div", { className: "failure-reason", key: "reason" }, failure.reason)
+                        : null,
+                ]) : null,
                 h("div", { className: "section-title", key: "payload-title" }, "Payload"),
-                isRefPayload && payloadLoading
+                payloadIsRef && payloadLoading
                     ? h("div", { className: "payload-loading", key: "payload-loading" }, "正在还原 payload…")
                     : h("pre", { className: "json-block", key: "payload" }, prettyJson(displayPayload ?? {})),
                 payloadNote ? h("div", { className: "payload-note", key: "note" }, payloadNote) : null,
+                payloadMissing && !payloadLoading && !payloadNote
+                    ? h("div", { className: "payload-note", key: "missing-note" }, "该记录未保留可还原的 payload。")
+                    : null,
                 h("div", { className: "section-title", key: "detail-title" }, "任务详情"),
                 h("pre", { className: "json-block", key: "detail" }, prettyJson(userData)),
                 Object.keys(metaData).length ? h("details", { className: "meta-details", key: "meta" }, [

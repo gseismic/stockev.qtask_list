@@ -42,11 +42,11 @@ function App() {
     const [toast, setToast] = useState("");
     const [loadingAction, setLoadingAction] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [payloadText, setPayloadText] = useState('{\n  "symbol": "SSE:600000"\n}');
+    const [payloadText, setPayloadText] = useState('{\n  "action": "example",\n  "symbol": "SSE:600000"\n}');
     const [delaySeconds, setDelaySeconds] = useState(0);
     const [expireSeconds, setExpireSeconds] = useState(0);
     const [pushOptions, setPushOptions] = useState({
-        action: "example",
+        action: "",
         logicalKey: "",
         scheduledFor: "",
         notBeforeAt: "",
@@ -288,12 +288,16 @@ function App() {
             if (!payload || Array.isArray(payload) || typeof payload !== "object") {
                 throw new Error("payload 必须是 JSON object");
             }
+            const explicitAction = pushOptions.action.trim();
+            if (!explicitAction && !(payload.action && typeof payload.action === "string" && payload.action)) {
+                throw new Error("缺少 action：请在高级选项填写 action，或在 payload 中包含 action 字段");
+            }
             if (pushOptions.allowNew && !confirmDanger("ALLOW_NEW 会绕过去重并替换 logical identity owner，继续？")) {
                 return;
             }
             const body = {
                 payload,
-                action: pushOptions.action.trim() || payload.action || null,
+                action: explicitAction || payload.action || null,
                 delay_seconds: delaySeconds,
                 expire_seconds: expireSeconds,
                 logical_key: pushOptions.logicalKey.trim() || null,
