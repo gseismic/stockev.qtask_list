@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -167,9 +168,25 @@ def api_health(_auth: None = Depends(require_auth)):
         return {"status": "error", "error": str(e), "redis": REDIS_URL}
 
 
+def _with_retry_wait(stats: Dict[str, Any], queue_name: str) -> Dict[str, Any]:
+    """V2 中 retry_wait 任务物理上在 delay ZSET（delay_reason=retry），
+    queue_stats 的 retry 只反映旧 V1 retry List（V2 恒为 0），
+    这里从 delay ZSET 派生 retry_wait 计数供前端 tab 展示。"""
+    retry_wait = 0
+    for raw_msg in redis_client.zrange(f"{queue_name}:delay", 0, -1):
+        try:
+            data = json.loads(raw_msg)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and data.get("delay_reason") == "retry":
+            retry_wait += 1
+    stats["retry_wait"] = retry_wait
+    return stats
+
+
 @app.get("/api/queues")
 def api_queues(_auth: None = Depends(require_auth)):
-    return admin.list_queues()
+    return [_with_retry_wait(q, q["name"]) for q in admin.list_queues()]
 
 
 @app.get("/api/workers")
@@ -200,7 +217,8 @@ def api_actions(
 
 @app.get("/api/queue/{name}")
 def api_queue(name: str, _auth: None = Depends(require_auth)):
-    return {"name": name, "stats": admin.queue_stats(name), "workers": admin.list_workers(name)}
+    stats = _with_retry_wait(admin.queue_stats(name), name)
+    return {"name": name, "stats": stats, "workers": admin.list_workers(name)}
 
 
 @app.get("/api/queue/{name}/tasks")

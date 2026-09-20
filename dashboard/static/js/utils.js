@@ -41,7 +41,7 @@ export function stateCount(stats = {}, state = "all") {
     if (state === "failed") return Number(stats.failed || 0);
     if (state === "deadline_missed") return Number(stats.deadline_missed || 0);
     // V2 的 retry_wait 与旧 retry List 共用同一"重试家族"计数展示。
-    if (state === "retry_wait") return Number(stats.retry || 0);
+    if (state === "retry_wait") return Number(stats.retry_wait ?? stats.retry ?? 0);
     return Number(stats[state] || 0);
 }
 
@@ -137,6 +137,11 @@ export function shouldOpenTaskSamples({ stats = {}, state = "all", search = "" }
 }
 
 export function taskState(task) {
+    // V2 中 retry_wait 任务物理上仍在 delay ZSET（_state=delay），
+    // 按 delay_reason 区分展示语义：retry → 重试等待，否则 → 延迟。
+    if ((task._state || task.status) === "delay" && (task.delay_reason || task._raw?.delay_reason) === "retry") {
+        return "retry_wait";
+    }
     return task._state || task.status || "ready";
 }
 
