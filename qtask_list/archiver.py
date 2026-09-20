@@ -51,7 +51,7 @@ class ArchiveManager:
 
     # 只归档 terminal 状态：仍在队列中的 live 任务（ready/processing/retry/delay）
     # 历史必须保留在 Redis，否则任务完成后 ack/fail 的历史更新会静默丢失
-    TERMINAL_STATUSES = ("completed", "failed", "skipped")
+    TERMINAL_STATUSES = ("completed", "failed", "skipped", "cancelled")
 
     def __init__(self, redis_url: str, db_dir: str = "archive_data", prefix: str = "qtask_hist"):
         self.redis_url = redis_url
@@ -159,10 +159,22 @@ class ArchiveManager:
             for i, raw in enumerate(raw_tasks):
                 if not raw:
                     continue
-                # live 任务不归档：留在 Redis 历史里，等 terminal 后由下一轮归档
-                if str(raw.get("status", "")) not in self.TERMINAL_STATUSES:
+                # 只有终态且不再有 operational message 的任务可以归档。
+                outcome = str(raw.get("outcome") or raw.get("status") or "")
+                if outcome not in self.TERMINAL_STATUSES:
+                    continue
+                if str(raw.get("operational_message", "0")).lower() in {"1", "true"}:
                     continue
                 tid = task_ids[i]
+                if self._has_operational_message(queue_full_name, str(tid)):
+                    continue
+                finished_at = float(
+                    raw.get("finished_at")
+                    or raw.get("updated_at")
+                    or raw.get("created_at", time.time())
+                )
+                if finished_at >= cutoff:
+                    continue
 
                 # 解析字段
                 created_at = float(raw.get("created_at", time.time()))
@@ -176,7 +188,7 @@ class ArchiveManager:
                         tid,
                         queue_full_name,
                         raw.get("action", ""),
-                        raw.get("status", ""),
+                        outcome,
                         raw.get("payload", "{}"),
                         raw.get("result", "{}"),
                         created_at,
@@ -227,3 +239,29 @@ class ArchiveManager:
                 break
 
         return total_archived
+
+    def _has_operational_message(self, queue_name: str, task_id: str) -> bool:
+        """兼容旧记录：归档前以容器再次确认消息已不存在。"""
+        list_keys = [
+            queue_name,
+            f"{queue_name}:retry",
+            f"{queue_name}:dlq",
+            f"{queue_name}:processing",
+            *self.r.scan_iter(f"{queue_name}:processing:*"),
+        ]
+        for key in list_keys:
+            for raw_message in self.r.lrange(key, 0, -1):
+                try:
+                    data = json.loads(raw_message)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(data, dict) and str(data.get("task_id") or "") == task_id:
+                    return True
+        for raw_message, _score in self.r.zscan_iter(f"{queue_name}:delay"):
+            try:
+                data = json.loads(raw_message)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(data, dict) and str(data.get("task_id") or "") == task_id:
+                return True
+        return False

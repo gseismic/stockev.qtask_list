@@ -42,34 +42,39 @@ export const api = {
         if (completedBefore) params.set("completed_before", String(completedBefore));
         return request(`/api/queue/${queuePath(queue)}/tasks?${params.toString()}`);
     },
-    pushTask: (queue, payload, delaySeconds = 0, expireSeconds = 0) =>
+    pushTask: (queue, body) =>
         request(`/api/queue/${queuePath(queue)}/tasks`, {
             method: "POST",
-            body: JSON.stringify({ payload, delay_seconds: delaySeconds, expire_seconds: expireSeconds }),
+            body: JSON.stringify(body),
         }),
     retryQueue: (queue) => request(`/api/queue/${queuePath(queue)}/retry`, { method: "POST" }),
     requeueDlq: (queue, taskId = null) =>
         request(`/api/queue/${queuePath(queue)}/requeue-dlq`, {
             method: "POST",
-            body: JSON.stringify({ task_id: taskId }),
+            body: JSON.stringify({ task_id: taskId, confirm_bulk: taskId === null }),
         }),
-    requeueExpired: (queue, taskId = null) =>
+    requeueExpired: (queue, startDeadlineAt, taskId = null) =>
         request(`/api/queue/${queuePath(queue)}/requeue-expired`, {
             method: "POST",
-            body: JSON.stringify({ task_id: taskId }),
+            body: JSON.stringify({ task_id: taskId, start_deadline_at: startDeadlineAt }),
         }),
     recoverQueue: (queue, includeActive = false) =>
         request(`/api/queue/${queuePath(queue)}/recover`, {
             method: "POST",
-            body: JSON.stringify({ include_active: includeActive }),
+            body: JSON.stringify({ include_active: includeActive, confirm_active: includeActive }),
         }),
-    clearQueue: (queue, includeDlq = true, includeHistory = false) =>
+    clearQueue: (queue, includeDlq = true, includeHistory = false, releaseIdentity = false) =>
         request(`/api/queue/${queuePath(queue)}/clear`, {
             method: "POST",
-            body: JSON.stringify({ include_dlq: includeDlq, include_history: includeHistory }),
+            body: JSON.stringify({
+                include_dlq: includeDlq,
+                include_history: includeHistory,
+                identity_policy: releaseIdentity ? "release" : "keep",
+                confirm_identity_release: releaseIdentity,
+            }),
         }),
     deleteQueue: (queue) =>
-        request(`/api/queue/${queuePath(queue)}`, { method: "DELETE" }),
+        request(`/api/queue/${queuePath(queue)}?confirm=true`, { method: "DELETE" }),
     taskPayload: (taskId, queue, state = "all") => {
         const params = new URLSearchParams({ queue, state });
         return request(`/api/task/${encodeURIComponent(taskId)}/payload?${params.toString()}`);
@@ -78,6 +83,11 @@ export const api = {
         request(`/api/task/${encodeURIComponent(taskId)}/requeue`, {
             method: "POST",
             body: JSON.stringify({ queue, from_state: fromState }),
+        }),
+    replayTask: (taskId, body) =>
+        request(`/api/task/${encodeURIComponent(taskId)}/replay`, {
+            method: "POST",
+            body: JSON.stringify(body),
         }),
     deleteTask: (taskId, queue = "") => {
         const suffix = queue ? `?queue=${queuePath(queue)}` : "";

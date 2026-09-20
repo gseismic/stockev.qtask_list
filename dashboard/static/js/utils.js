@@ -1,4 +1,4 @@
-export const states = ["all", "ready", "processing", "retry", "dlq", "delay", "completed", "failed", "skipped", "expired", "history"];
+export const states = ["all", "ready", "processing", "retry_wait", "dlq", "delay", "completed", "failed", "skipped", "cancelled", "deadline_missed", "history"];
 
 export function stateLabel(state) {
     const labels = {
@@ -6,11 +6,14 @@ export function stateLabel(state) {
         ready: "待处理",
         processing: "处理中",
         retry: "待重试",
+        retry_wait: "重试等待",
         dlq: "死信",
         delay: "延迟",
         completed: "已完成",
         failed: "已失败",
         skipped: "已跳过",
+        cancelled: "已取消",
+        deadline_missed: "错过截止",
         expired: "已过期",
         history: "历史",
         active: "活跃",
@@ -36,7 +39,7 @@ export function stateCount(stats = {}, state = "all") {
     if (state === "ready") return Number(stats.queue || 0);
     if (state === "completed") return Number(stats.completed || 0);
     if (state === "failed") return Number(stats.failed || 0);
-    if (state === "expired") return Number(stats.expired || 0);
+    if (state === "deadline_missed") return Number(stats.deadline_missed || 0);
     return Number(stats[state] || 0);
 }
 
@@ -142,8 +145,8 @@ export function shortId(taskId) {
 
 export function summarize(value, maxLength = 140) {
     if (value && typeof value === "object" && !Array.isArray(value)) {
-        if (value._large) return `[大payload] key=${value.key || "?"}`;
-        if (value._compressed) return "[压缩payload]";
+        if (value._large || value.kind === "external") return `[大payload] key=${value.key || "?"}`;
+        if (value._compressed || value.kind === "zstd") return "[压缩payload]";
     }
     const text = typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 0);
     if (text.length <= maxLength) return text;
@@ -176,7 +179,9 @@ export function formatTime(timestamp) {
 }
 
 export function canRequeue(task) {
-    return ["retry", "dlq", "delay", "processing", "expired"].includes(taskState(task));
+    const outcome = task.outcome || task.status;
+    return ["retry", "retry_wait", "dlq", "delay", "processing", "deadline_missed"].includes(taskState(task))
+        || ["failed", "skipped", "cancelled"].includes(outcome);
 }
 
 export function confirmDanger(message) {

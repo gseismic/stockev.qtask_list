@@ -2,10 +2,40 @@ from .queue import SmartQueue
 from .worker import Worker
 from .storage import RemoteStorage
 from .admin import QueueAdmin, QueueState
+from .clock import Clock, FrozenClock, SystemClock
+from .errors import PermanentTaskError, RetryableTaskError
+from .models import (
+    DuplicateAction,
+    EnqueueResult,
+    HistoryMode,
+    IdentityPolicy,
+    TaskContext,
+    TaskResult,
+    TaskSpec,
+)
 
-__all__ = ["SmartQueue", "Worker", "RemoteStorage", "QueueAdmin", "QueueState", "start_dashboard"]
+__all__ = [
+    "Clock",
+    "DuplicateAction",
+    "EnqueueResult",
+    "FrozenClock",
+    "HistoryMode",
+    "IdentityPolicy",
+    "PermanentTaskError",
+    "QueueAdmin",
+    "QueueState",
+    "RemoteStorage",
+    "RetryableTaskError",
+    "SmartQueue",
+    "SystemClock",
+    "TaskContext",
+    "TaskResult",
+    "TaskSpec",
+    "Worker",
+    "start_dashboard",
+]
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 
 def start_dashboard(

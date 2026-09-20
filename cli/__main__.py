@@ -35,8 +35,14 @@ class QueueState(str, Enum):
     ready = "ready"
     processing = "processing"
     retry = "retry"
+    retry_wait = "retry_wait"
     dlq = "dlq"
     delay = "delay"
+    completed = "completed"
+    failed = "failed"
+    skipped = "skipped"
+    cancelled = "cancelled"
+    deadline_missed = "deadline_missed"
 
 
 app = typer.Typer()
@@ -211,6 +217,20 @@ def push(
     payload: Optional[str] = typer.Argument(None, help='JSON payload，如 {"action":"fetch"}'),
     payload_file: Optional[Path] = typer.Option(None, "--file", "-f", help="从 JSON 文件读取 payload"),
     delay_seconds: int = typer.Option(0, "--delay", "-d", help="延迟执行秒数"),
+    expire_seconds: int = typer.Option(0, "--expire", help="相对开始截止秒数"),
+    action: Optional[str] = typer.Option(None, "--action", help="handler action，默认读取 payload.action"),
+    logical_key: Optional[str] = typer.Option(None, "--logical-key", help="业务幂等身份"),
+    scheduled_for: Optional[str] = typer.Option(None, "--scheduled-for", help="计划时刻 ISO 8601"),
+    not_before_at: Optional[str] = typer.Option(None, "--not-before", help="最早开始时刻 ISO 8601"),
+    start_deadline_at: Optional[str] = typer.Option(None, "--start-deadline", help="最晚开始时刻 ISO 8601"),
+    dedup_until: Optional[str] = typer.Option(None, "--dedup-until", help="终态后重复抑制边界 ISO 8601"),
+    trace_id: Optional[str] = typer.Option(None, "--trace-id", help="跨任务追踪 ID"),
+    parent_task_id: Optional[str] = typer.Option(None, "--parent-task-id", help="fan-out 父任务 ID"),
+    concurrency_key: Optional[str] = typer.Option(None, "--concurrency-key", help="同键串行 lease"),
+    supersede_key: Optional[str] = typer.Option(None, "--supersede-key", help="latest-only 身份"),
+    supersede_version: Optional[str] = typer.Option(None, "--supersede-version", help="latest-only 版本"),
+    allow_new: bool = typer.Option(False, "--allow-new", help="允许覆盖现有 logical owner"),
+    force_duplicate: bool = typer.Option(False, "--force-duplicate", help="确认危险的同键新实例"),
     namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
     json_output: bool = typer.Option(False, "--json", help="输出 JSON"),
@@ -222,13 +242,44 @@ def push(
 
     payload_data = load_payload(payload, payload_file)
     queue_name = normalize_queue_name(queue_name, namespace)
-    result = admin_from_url(redis_url).push_task(queue_name, payload_data, delay_seconds=delay_seconds)
+    if allow_new and not force_duplicate:
+        console.print("[red]--allow-new 会替换 logical owner；请同时传 --force-duplicate[/red]")
+        raise typer.Exit(2)
+    parsed_supersede_version: int | str | None = supersede_version
+    if supersede_version is not None:
+        try:
+            parsed_supersede_version = int(supersede_version)
+        except ValueError:
+            parsed_supersede_version = supersede_version
+    result = admin_from_url(redis_url).push_task(
+        queue_name,
+        payload_data,
+        delay_seconds=delay_seconds,
+        expire_seconds=expire_seconds,
+        action=action,
+        logical_key=logical_key,
+        scheduled_for=scheduled_for,
+        not_before_at=not_before_at,
+        start_deadline_at=start_deadline_at,
+        dedup_until=dedup_until,
+        trace_id=trace_id,
+        parent_task_id=parent_task_id,
+        concurrency_key=concurrency_key,
+        supersede_key=supersede_key,
+        supersede_version=parsed_supersede_version,
+        on_duplicate="allow_new" if allow_new else "reject",
+    )
     task_id = result["task_id"]
 
     if json_output:
         console.print_json(json_dumps(result))
     else:
-        console.print(f"[green]Pushed task {task_id} to {result['queue']}[/green]")
+        if result["accepted"]:
+            console.print(f"[green]Pushed task {task_id} to {result['queue']}[/green]")
+        else:
+            console.print(
+                f"[yellow]Not enqueued: {result['reason']} duplicate_of={result['duplicate_of']}[/yellow]"
+            )
 
 
 @app.command()
@@ -258,6 +309,11 @@ def clear(
     queue_name: str = typer.Argument(..., help="队列名称"),
     include_dlq: bool = typer.Option(True, "--include-dlq/--no-dlq", help="是否包含 DLQ"),
     include_history: bool = typer.Option(False, "--include-history", help="是否包含任务历史"),
+    release_identity: bool = typer.Option(
+        False,
+        "--release-identity",
+        help="同时释放 logical identity（危险；默认保留终态抑制边界）",
+    ),
     namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
     force: bool = typer.Option(False, "--force", "-f", help="强制执行"),
@@ -268,6 +324,8 @@ def clear(
         console.print(f"[red]WARNING: This will clear queue {queue_name}[/red]")
         if include_history:
             console.print("[red]History records for this queue will also be removed[/red]")
+        if release_identity:
+            console.print("[red]Logical identity owners will be released[/red]")
         if not typer.confirm("Continue?"):
             raise typer.Abort()
 
@@ -275,6 +333,7 @@ def clear(
         queue_name,
         include_dlq=include_dlq,
         include_history=include_history,
+        identity_policy="release" if release_identity else "keep",
     )
     history_count = result["history_records"]
 
@@ -293,7 +352,7 @@ def requeue(
         False, "--keep-retry", help="保留原有重试计数（默认重置，人工重放视为全新尝试）"
     ),
 ):
-    """将 DLQ 中的任务重新入队（默认重置重试计数）"""
+    """以新 task_id replay DLQ 任务；旧实例保持 failed。"""
     queue_name = normalize_queue_name(queue_name, namespace)
     if not force:
         target = f"task {task_id}" if task_id else "all tasks"
@@ -303,9 +362,15 @@ def requeue(
 
     admin = admin_from_url(redis_url)
     if task_id:
-        moved = int(admin.requeue_dlq(queue_name, task_id, reset_retry=not keep_retry)["moved"])
+        replay_result = admin.requeue_dlq(
+            queue_name,
+            task_id,
+            reset_retry=not keep_retry,
+        )
+        moved = int(replay_result["moved"])
         if moved:
-            console.print(f"[green]Requeued task {task_id} from DLQ[/green]")
+            new_task_id = replay_result.get("task_id")
+            console.print(f"[green]Replayed task {task_id} as {new_task_id}[/green]")
         else:
             console.print(f"[yellow]Task {task_id} not found in DLQ[/yellow]")
             raise typer.Exit(1)
@@ -337,9 +402,14 @@ def recover(
         "--force-active",
         help="也恢复仍有 heartbeat 的 active worker processing 队列",
     ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="确认强制恢复活跃 Worker"),
 ):
     """恢复 processing 队列中的任务，默认只恢复 stale worker"""
     queue_name = normalize_queue_name(queue_name, namespace)
+    if force_active and not yes:
+        console.print("[red]WARNING: active handler 可能仍在产生外部副作用[/red]")
+        if not typer.confirm("Force recover active workers?"):
+            raise typer.Abort()
     result = admin_from_url(redis_url).recover(queue_name, include_active=force_active)
     count = result["recovered"]
     skipped = result["skipped_active"]
@@ -670,6 +740,54 @@ def task_delete(
             f"{result['queue_messages']} queue messages, "
             f"{result['history_records']} history records, "
             f"{result['history_indexes']} history index entries[/green]"
+        )
+
+
+@task_app.command("replay")
+def task_replay(
+    task_id: str = typer.Argument(..., help="原 failed/skipped/cancelled 任务 ID"),
+    queue_name: Optional[str] = typer.Option(None, "--queue", "-q", help="队列名称；默认从历史推导"),
+    start_deadline_at: Optional[str] = typer.Option(
+        None,
+        "--start-deadline",
+        help="新的最晚开始时刻 ISO 8601；旧 deadline 已过时必填",
+    ),
+    payload: Optional[str] = typer.Option(None, "--payload", help="替换 JSON payload"),
+    payload_file: Optional[Path] = typer.Option(None, "--file", "-f", help="从文件读取替换 payload"),
+    logical_key: Optional[str] = typer.Option(None, "--logical-key", help="替换 logical key"),
+    action: Optional[str] = typer.Option(None, "--action", help="替换 action"),
+    namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
+    redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
+    force: bool = typer.Option(False, "--force", "-f", help="确认创建新执行实例"),
+    json_output: bool = typer.Option(False, "--json", help="输出 JSON"),
+):
+    """以新 task_id 重放终态任务，原记录保持不变。"""
+    normalized_queue = normalize_queue_name(queue_name, namespace) if queue_name else None
+    if not force:
+        console.print(f"[red]WARNING: replay will create a new task instance for {task_id}[/red]")
+        if not typer.confirm("Continue?"):
+            raise typer.Abort()
+    replace_payload = payload is not None or payload_file is not None
+    payload_data = load_payload(payload, payload_file) if replace_payload else None
+    result = admin_from_url(redis_url).replay_task(
+        task_id,
+        queue_name=normalized_queue,
+        start_deadline_at=start_deadline_at,
+        payload=payload_data,
+        logical_key=logical_key,
+        replace_payload=replace_payload,
+        replace_logical_key=logical_key is not None,
+        action=action,
+    )
+    if json_output:
+        console.print_json(json_dumps(result))
+    elif result["accepted"]:
+        console.print(
+            f"[green]Replayed {task_id} as {result['task_id']} in {result['queue']}[/green]"
+        )
+    else:
+        console.print(
+            f"[yellow]Replay rejected: {result['reason']} duplicate_of={result['duplicate_of']}[/yellow]"
         )
 
 

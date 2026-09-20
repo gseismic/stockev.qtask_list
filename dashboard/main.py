@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 import redis
@@ -20,6 +21,7 @@ from dashboard.auth import (
 )
 from qtask_list.admin import QueueAdmin, QueueState
 from qtask_list.archiver import Monitor
+from qtask_list.models import DuplicateAction, IdentityPolicy
 from qtask_list.storage import RemoteStorage
 
 
@@ -46,17 +48,33 @@ app.add_middleware(
 
 class PushTaskRequest(BaseModel):
     payload: Dict[str, Any]
+    action: Optional[str] = None
     delay_seconds: int = Field(default=0, ge=0)
     expire_seconds: int = Field(default=0, ge=0)
+    logical_key: Optional[str] = None
+    scheduled_for: Optional[datetime] = None
+    not_before_at: Optional[datetime] = None
+    start_deadline_at: Optional[datetime] = None
+    dedup_until: Optional[datetime] = None
+    trace_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    concurrency_key: Optional[str] = None
+    supersede_key: Optional[str] = None
+    supersede_version: int | str | None = None
+    duplicate_action: DuplicateAction = DuplicateAction.REJECT
+    confirm_duplicate: bool = False
 
 
 class RecoverRequest(BaseModel):
     include_active: bool = False
+    confirm_active: bool = False
 
 
 class ClearQueueRequest(BaseModel):
     include_dlq: bool = True
     include_history: bool = False
+    identity_policy: IdentityPolicy = IdentityPolicy.KEEP
+    confirm_identity_release: bool = False
 
 
 class RequeueTaskRequest(BaseModel):
@@ -66,6 +84,17 @@ class RequeueTaskRequest(BaseModel):
 
 class RequeueDlqRequest(BaseModel):
     task_id: Optional[str] = None
+    confirm_bulk: bool = False
+
+
+class ReplayTaskRequest(BaseModel):
+    queue: Optional[str] = None
+    start_deadline_at: Optional[datetime] = None
+    payload: Optional[Dict[str, Any]] = None
+    logical_key: Optional[str] = None
+    replace_payload: bool = False
+    replace_logical_key: bool = False
+    action: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -210,11 +239,28 @@ def api_push_task(
     request: PushTaskRequest,
     _auth: None = Depends(require_auth),
 ):
+    if (
+        request.duplicate_action == DuplicateAction.ALLOW_NEW
+        and not request.confirm_duplicate
+    ):
+        raise HTTPException(status_code=400, detail="ALLOW_NEW 需要 confirm_duplicate=true")
     return admin.push_task(
         name,
         request.payload,
         delay_seconds=request.delay_seconds,
         expire_seconds=request.expire_seconds,
+        action=request.action,
+        logical_key=request.logical_key,
+        scheduled_for=request.scheduled_for,
+        not_before_at=request.not_before_at,
+        start_deadline_at=request.start_deadline_at,
+        dedup_until=request.dedup_until,
+        trace_id=request.trace_id,
+        parent_task_id=request.parent_task_id,
+        concurrency_key=request.concurrency_key,
+        supersede_key=request.supersede_key,
+        supersede_version=request.supersede_version,
+        on_duplicate=request.duplicate_action,
     )
 
 
@@ -229,6 +275,8 @@ def api_requeue_dlq(
     request: RequeueDlqRequest,
     _auth: None = Depends(require_auth),
 ):
+    if request.task_id is None and not request.confirm_bulk:
+        raise HTTPException(status_code=400, detail="批量 replay DLQ 需要 confirm_bulk=true")
     return admin.requeue_dlq(name, task_id=request.task_id)
 
 
@@ -244,6 +292,7 @@ def api_queue_expired(
 
 class RequeueExpiredRequest(BaseModel):
     task_id: Optional[str] = None
+    start_deadline_at: datetime
 
 
 @app.post("/api/queue/{name}/requeue-expired")
@@ -252,7 +301,11 @@ def api_requeue_expired(
     request: RequeueExpiredRequest,
     _auth: None = Depends(require_auth),
 ):
-    return admin.requeue_expired(name, task_id=request.task_id)
+    return admin.requeue_expired(
+        name,
+        task_id=request.task_id,
+        start_deadline_at=request.start_deadline_at,
+    )
 
 
 @app.post("/api/queue/{name}/recover")
@@ -261,6 +314,8 @@ def api_recover_queue(
     request: RecoverRequest,
     _auth: None = Depends(require_auth),
 ):
+    if request.include_active and not request.confirm_active:
+        raise HTTPException(status_code=400, detail="强制恢复活跃 Worker 需要 confirm_active=true")
     return admin.recover(name, include_active=request.include_active)
 
 
@@ -270,10 +325,19 @@ def api_clear_queue(
     request: ClearQueueRequest,
     _auth: None = Depends(require_auth),
 ):
+    if (
+        request.identity_policy == IdentityPolicy.RELEASE
+        and not request.confirm_identity_release
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="释放 logical identity 需要 confirm_identity_release=true",
+        )
     return admin.clear_queue(
         name,
         include_dlq=request.include_dlq,
         include_history=request.include_history,
+        identity_policy=request.identity_policy,
     )
 
 
@@ -338,6 +402,27 @@ def api_task_requeue(
     return result
 
 
+@app.post("/api/task/{task_id}/replay")
+def api_task_replay(
+    task_id: str,
+    request: ReplayTaskRequest,
+    _auth: None = Depends(require_auth),
+):
+    try:
+        return admin.replay_task(
+            task_id,
+            queue_name=request.queue,
+            start_deadline_at=request.start_deadline_at,
+            payload=request.payload,
+            logical_key=request.logical_key,
+            replace_payload=request.replace_payload,
+            replace_logical_key=request.replace_logical_key,
+            action=request.action,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.delete("/api/task/{task_id}")
 def api_task_delete(
     task_id: str,
@@ -350,8 +435,11 @@ def api_task_delete(
 @app.delete("/api/queue/{name}")
 def api_delete_queue(
     name: str,
+    confirm: bool = Query(False, description="Confirm destructive queue deletion"),
     _auth: None = Depends(require_auth),
 ):
+    if not confirm:
+        raise HTTPException(status_code=400, detail="删除队列需要 confirm=true")
     return admin.delete_queue(name)
 
 

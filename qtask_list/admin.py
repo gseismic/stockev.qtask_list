@@ -2,12 +2,22 @@ import base64
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 
 import redis
 import zstandard
 
+from .clock import Clock, SystemClock
+from .models import (
+    DuplicateAction,
+    EnqueueResult,
+    HistoryMode,
+    IdentityPolicy,
+    JsonValue,
+    TaskSpec,
+)
 from .queue import SmartQueue
 from .storage import RemoteStorage
 
@@ -18,12 +28,15 @@ class QueueState(str, Enum):
     ready = "ready"
     processing = "processing"
     retry = "retry"
+    retry_wait = "retry_wait"
     dlq = "dlq"
     delay = "delay"
     history = "history"
     completed = "completed"
     failed = "failed"
     skipped = "skipped"
+    cancelled = "cancelled"
+    deadline_missed = "deadline_missed"
     expired = "expired"
     all = "all"
 
@@ -36,10 +49,23 @@ class QueueAdmin:
         redis_url: Optional[str] = None,
         redis_client: Optional[Any] = None,
         storage: Optional[RemoteStorage] = None,
+        *,
+        max_attempts: int = 3,
+        retry_backoff_base: float = 30,
+        retry_backoff_max: float = 3600,
+        ttl_days: int = 15,
+        history_mode: HistoryMode | str = HistoryMode.FULL,
+        clock: Clock | None = None,
     ):
         self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self.r: Any = redis_client or redis.from_url(self.redis_url, decode_responses=True)
         self.storage = storage
+        self.max_attempts = max_attempts
+        self.retry_backoff_base = retry_backoff_base
+        self.retry_backoff_max = retry_backoff_max
+        self.ttl_days = ttl_days
+        self.history_mode = HistoryMode(history_mode)
+        self.clock = clock or SystemClock()
 
     # ==================== Queue Discovery ====================
 
@@ -47,7 +73,7 @@ class QueueAdmin:
         return [{"name": queue, **self.queue_stats(queue)} for queue in self.queue_names()]
 
     def queue_names(self) -> List[str]:
-        queues = set()
+        queues = set(self.r.zrange("qtask:queues", 0, -1))
         for key in self.r.scan_iter("qtask:hist:*"):
             queues.add(key.replace("qtask:hist:", ""))
 
@@ -86,7 +112,9 @@ class QueueAdmin:
             "completed": history_counts["completed"],
             "failed": history_counts["failed"],
             "skipped": history_counts["skipped"],
-            "expired": expired_count,
+            "cancelled": history_counts["cancelled"],
+            "deadline_missed": expired_count,
+            "expired": expired_count,  # 一个小版本的兼容别名
             "active_workers": sum(1 for worker in workers if worker["active"]),
             "stale_workers": sum(1 for worker in workers if not worker["active"]),
         }
@@ -99,17 +127,33 @@ class QueueAdmin:
         hist_key = f"qtask:hist:{queue_name}"
         total = int(self.r.zcard(hist_key) or 0)
         if total == 0:
-            return {"total": 0, "completed": 0, "failed": 0, "skipped": 0}
+            return {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "cancelled": 0,
+            }
 
         task_ids = self.r.zrevrange(hist_key, 0, sample_limit - 1)
         if not task_ids:
-            return {"total": total, "completed": 0, "failed": 0, "skipped": 0}
+            return {
+                "total": total,
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "cancelled": 0,
+            }
 
-        statuses = [record.get("status") for record in self._read_history_records(task_ids)]
+        statuses = [
+            record.get("outcome") or record.get("status")
+            for record in self._read_history_records(task_ids)
+        ]
 
         sampled_completed = sum(1 for s in statuses if s == "completed")
         sampled_failed = sum(1 for s in statuses if s == "failed")
         sampled_skipped = sum(1 for s in statuses if s == "skipped")
+        sampled_cancelled = sum(1 for s in statuses if s == "cancelled")
 
         if total <= sample_limit:
             return {
@@ -117,6 +161,7 @@ class QueueAdmin:
                 "completed": sampled_completed,
                 "failed": sampled_failed,
                 "skipped": sampled_skipped,
+                "cancelled": sampled_cancelled,
             }
 
         ratio = total / len(task_ids)
@@ -125,31 +170,11 @@ class QueueAdmin:
             "completed": int(sampled_completed * ratio),
             "failed": int(sampled_failed * ratio),
             "skipped": int(sampled_skipped * ratio),
+            "cancelled": int(sampled_cancelled * ratio),
         }
 
     def _expired_count(self, queue_name: str, sample_limit: int = 200) -> int:
-        hist_key = f"qtask:hist:{queue_name}"
-        task_ids = self.r.zrevrange(hist_key, 0, sample_limit - 1)
-        if not task_ids:
-            return 0
-        now = time.time()
-        expired = 0
-        for task_id in task_ids:
-            data = self.get_task(task_id)
-            if not data:
-                continue
-            expires_at = data.get("expires_at")
-            status = data.get("status", "")
-            if (
-                expires_at
-                and float(expires_at) < now
-                and status not in ("completed", "failed")
-            ):
-                expired += 1
-        total = int(self.r.zcard(hist_key) or 0)
-        if total <= sample_limit:
-            return expired
-        return int(expired * (total / len(task_ids)))
+        return len(self._read_deadline_missed(queue_name, limit=sample_limit))
 
     def processing_keys(self, queue_name: str, include_legacy: bool = True) -> List[str]:
         keys = set(self.r.scan_iter(f"{queue_name}:processing:*"))
@@ -220,8 +245,13 @@ class QueueAdmin:
                 QueueState.dlq,
                 QueueState.delay,
             ]
-        elif selected_state in (QueueState.completed, QueueState.failed, QueueState.skipped):
-            # 按 status 过滤 history
+        elif selected_state in (
+            QueueState.completed,
+            QueueState.failed,
+            QueueState.skipped,
+            QueueState.cancelled,
+        ):
+            # 按不可变 outcome 过滤 history；兼容旧 status 记录。
             status = selected_state.value
             return self._read_history_by_status(
                 queue_name,
@@ -233,13 +263,8 @@ class QueueAdmin:
                 completed_after=completed_after,
                 completed_before=completed_before,
             )
-        elif selected_state == QueueState.expired:
-            read_limit = max(limit * 3, limit)
-            expired_rows = self._read_expired(
-                queue_name,
-                limit=read_limit,
-                scan_limit=max(read_limit, 300),
-            )
+        elif selected_state in (QueueState.expired, QueueState.deadline_missed):
+            expired_rows = self._read_deadline_missed(queue_name, limit=max(limit * 3, limit))
             expired_rows = self._apply_time_filters(expired_rows, created_after, created_before)
             if search:
                 needle = search.lower()
@@ -249,6 +274,13 @@ class QueueAdmin:
                     if needle in json.dumps(r, ensure_ascii=False, default=str).lower()
                 ]
             return expired_rows[:limit]
+        elif selected_state == QueueState.retry_wait:
+            retry_rows = [
+                row
+                for row in self._read_delay(queue_name, max(limit * 3, limit))
+                if row.get("delay_reason") == "retry"
+            ]
+            return retry_rows[:limit]
         else:
             states = [selected_state]
 
@@ -317,16 +349,47 @@ class QueueAdmin:
             QueueState.completed,
             QueueState.failed,
             QueueState.skipped,
+            QueueState.cancelled,
         ):
             task = self.get_task(task_id)
             if not task:
                 return {"task_id": task_id, "payload": None, "_note": "历史记录不含完整 payload"}
-            payload = task.get("payload")
-            note = "" if payload else "历史记录不含完整 payload，仅保留 action 和状态"
-            result = {"task_id": task_id, "payload": payload, "action": task.get("action", "")}
-            if note:
-                result["_note"] = note
-            return result
+            descriptor = task.get("payload_descriptor")
+            if isinstance(descriptor, dict):
+                envelope = {
+                    "version": 2,
+                    "task_id": task_id,
+                    "action": task.get("action") or "unknown",
+                    "attempt": task.get("attempt", 0),
+                    "max_attempts": task.get("max_attempts", self.max_attempts),
+                    "payload": descriptor,
+                }
+                try:
+                    queue = self._smart_queue(queue_name)
+                    decoded_payload = queue.codec.decode_payload(
+                        queue.codec.header(json.dumps(envelope))
+                    )
+                    return {
+                        "task_id": task_id,
+                        "payload": decoded_payload,
+                        "action": task.get("action", ""),
+                    }
+                except Exception as exc:
+                    return {
+                        "task_id": task_id,
+                        "payload": descriptor,
+                        "action": task.get("action", ""),
+                        "_note": f"payload 还原失败: {exc}",
+                    }
+            history_payload = task.get("payload")
+            return {
+                "task_id": task_id,
+                "payload": history_payload,
+                "action": task.get("action", ""),
+                "_note": (
+                    "历史记录不含 V2 payload descriptor" if history_payload is None else ""
+                ),
+            }
 
         for item_state in ([selected_state] if selected_state != QueueState.all else [
             QueueState.ready, QueueState.processing, QueueState.retry, QueueState.dlq, QueueState.delay,
@@ -366,49 +429,75 @@ class QueueAdmin:
 
     def _resolve_payload_from_msg(self, raw_msg: str, task_id: str) -> Dict[str, Any]:
         try:
+            queue_name = self._find_history_queue(task_id)
+            queue = self._smart_queue(queue_name) if queue_name else None
+            if queue is not None:
+                header = queue.codec.header(raw_msg)
+                payload = queue.codec.decode_payload(header)
+                return {"task_id": task_id, "payload": payload, "action": header.action}
+        except Exception as exc:
+            return {"task_id": task_id, "payload": None, "_note": f"payload 还原失败: {exc}"}
+
+        # 无历史队列名时保留 V1 兼容解析。
+        try:
             data = json.loads(raw_msg)
         except (json.JSONDecodeError, TypeError):
             return {"task_id": task_id, "payload": None, "_note": "消息解码失败"}
 
         payload_raw = data.get("payload", {})
-        payload = self._parse_json(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        legacy_payload = self._parse_json(payload_raw) if isinstance(payload_raw, str) else payload_raw
 
-        if isinstance(payload, dict):
-            if payload.get("_compressed"):
+        if isinstance(legacy_payload, dict):
+            if legacy_payload.get("_compressed"):
                 try:
-                    compressed = base64.b64decode(payload["data"])
+                    encoded_data = legacy_payload.get("data")
+                    if not isinstance(encoded_data, str):
+                        raise ValueError("compressed payload data must be a string")
+                    compressed = base64.b64decode(encoded_data)
                     # 每次新建解压上下文：dashboard 线程池并发调用，共享实例不安全
                     raw = zstandard.ZstdDecompressor().decompress(compressed)
-                    payload = json.loads(raw)
+                    legacy_payload = json.loads(raw)
                 except Exception as e:
-                    return {"task_id": task_id, "payload": payload, "_note": f"解压失败: {e}"}
+                    return {
+                        "task_id": task_id,
+                        "payload": legacy_payload,
+                        "_note": f"解压失败: {e}",
+                    }
 
-            elif payload.get("_large"):
+            elif legacy_payload.get("_large"):
                 if self.storage:
                     try:
-                        raw = self.storage.load(payload["key"])
-                        payload = json.loads(raw)
+                        storage_key = legacy_payload.get("key")
+                        if not isinstance(storage_key, str):
+                            raise ValueError("external payload key must be a string")
+                        raw = self.storage.load(storage_key)
+                        legacy_payload = json.loads(raw)
                     except Exception as e:
-                        return {"task_id": task_id, "payload": payload, "_note": f"外存拉取失败: {e}"}
+                        return {
+                            "task_id": task_id,
+                            "payload": legacy_payload,
+                            "_note": f"外存拉取失败: {e}",
+                        }
                 else:
                     action = ""
                     hist = self.get_task(task_id)
                     if hist:
-                        action = hist.get("action", "")
+                        action = str(hist.get("action") or "")
                     return {
                         "task_id": task_id,
-                        "payload": payload,
+                        "payload": legacy_payload,
                         "action": action,
                         "_note": "未配置 RemoteStorage，无法还原大 payload",
                     }
 
-        action = payload.get("action", "") if isinstance(payload, dict) else ""
+        action_value = legacy_payload.get("action", "") if isinstance(legacy_payload, dict) else ""
+        action = str(action_value) if isinstance(action_value, str) else ""
         if not action:
             hist = self.get_task(task_id)
             if hist:
-                action = hist.get("action", "")
+                action = str(hist.get("action") or "")
 
-        return {"task_id": task_id, "payload": payload, "action": action}
+        return {"task_id": task_id, "payload": legacy_payload, "action": action}
 
     def diagnose(self, queue_name: str) -> Dict[str, Any]:
         stats = self.queue_stats(queue_name)
@@ -437,33 +526,140 @@ class QueueAdmin:
 
     # ==================== Task Control ====================
 
+    def enqueue(
+        self,
+        queue_name: str,
+        spec: TaskSpec,
+        *,
+        on_duplicate: DuplicateAction | str = DuplicateAction.REJECT,
+    ) -> EnqueueResult:
+        """以与 Python SDK 相同的 TaskSpec 语义投递。"""
+        return self._smart_queue(queue_name).enqueue(spec, on_duplicate=on_duplicate)
+
+    def enqueue_many(
+        self,
+        queue_name: str,
+        specs: Sequence[TaskSpec],
+        *,
+        on_duplicate: DuplicateAction | str = DuplicateAction.REJECT,
+    ) -> list[EnqueueResult]:
+        """批量投递 TaskSpec，返回等长结构化结果。"""
+        return self._smart_queue(queue_name).enqueue_many(specs, on_duplicate=on_duplicate)
+
     def push_task(
         self,
         queue_name: str,
         payload: Dict[str, Any],
         delay_seconds: int = 0,
         expire_seconds: int = 0,
+        *,
+        action: str | None = None,
+        logical_key: str | None = None,
+        scheduled_for: datetime | str | float | None = None,
+        not_before_at: datetime | str | float | None = None,
+        start_deadline_at: datetime | str | float | None = None,
+        dedup_until: datetime | str | float | None = None,
+        dedup_ttl: int | float | None = None,
+        trace_id: str | None = None,
+        parent_task_id: str | None = None,
+        concurrency_key: str | None = None,
+        supersede_key: str | None = None,
+        supersede_version: int | str | None = None,
+        on_duplicate: DuplicateAction | str = DuplicateAction.REJECT,
     ) -> Dict[str, Any]:
-        queue = self._smart_queue(queue_name)
-        task_id = queue.push(payload, delay_seconds=delay_seconds, expire_seconds=expire_seconds)
-        return {"queue": queue.base, "task_id": task_id, "delay_seconds": delay_seconds}
+        if delay_seconds < 0 or expire_seconds < 0 or (dedup_ttl is not None and dedup_ttl < 0):
+            raise ValueError("relative time values must be >= 0")
+        now = datetime.fromtimestamp(self.clock.now(), tz=timezone.utc)
+        not_before = self._coerce_datetime(not_before_at)
+        deadline = self._coerce_datetime(start_deadline_at)
+        retained = self._coerce_datetime(dedup_until)
+        if not_before is None and delay_seconds:
+            not_before = now + timedelta(seconds=delay_seconds)
+        if deadline is None and expire_seconds:
+            deadline = now + timedelta(seconds=expire_seconds)
+        if retained is None and dedup_ttl:
+            retained = now + timedelta(seconds=float(dedup_ttl))
+        selected_action = action or payload.get("action")
+        if not isinstance(selected_action, str) or not selected_action:
+            raise ValueError("action or payload['action'] is required")
+        spec = TaskSpec(
+            action=selected_action,
+            payload=cast(Mapping[str, JsonValue], payload),
+            logical_key=logical_key,
+            scheduled_for=self._coerce_datetime(scheduled_for),
+            not_before_at=not_before,
+            start_deadline_at=deadline,
+            dedup_until=retained,
+            trace_id=trace_id,
+            parent_task_id=parent_task_id,
+            concurrency_key=concurrency_key,
+            supersede_key=supersede_key,
+            supersede_version=supersede_version,
+        )
+        result = self.enqueue(queue_name, spec, on_duplicate=on_duplicate)
+        return {"queue": queue_name, **result.as_dict(), "delay_seconds": delay_seconds}
 
     def move_retry(self, queue_name: str) -> Dict[str, int]:
-        count = self._drain_list_to_ready(f"{queue_name}:retry", queue_name, update_status=True)
+        count = self._smart_queue(queue_name).move_retry()
         return {"moved": count}
+
+    def replay_task(
+        self,
+        task_id: str,
+        *,
+        queue_name: str | None = None,
+        start_deadline_at: datetime | str | float | None = None,
+        payload: Mapping[str, JsonValue] | None = None,
+        logical_key: str | None = None,
+        replace_payload: bool = False,
+        replace_logical_key: bool = False,
+        action: str | None = None,
+    ) -> Dict[str, Any]:
+        """创建新实例 replay，返回新 task_id；原终态记录不变。"""
+        record = self.get_task(task_id)
+        selected_queue = queue_name or (str(record.get("_queue")) if record else None)
+        selected_queue = selected_queue or self._find_history_queue(task_id)
+        if not selected_queue:
+            raise KeyError(f"cannot determine queue for task: {task_id}")
+        queue = self._smart_queue(selected_queue)
+        kwargs: dict[str, Any] = {
+            "start_deadline_at": self._coerce_datetime(start_deadline_at),
+            "action": action,
+        }
+        if replace_payload:
+            if payload is None:
+                raise ValueError("replace_payload=True requires payload")
+            kwargs["payload"] = payload
+        if replace_logical_key:
+            kwargs["logical_key"] = logical_key
+        result = queue.replay_task(task_id, **kwargs)
+        return {"queue": selected_queue, "replay_of": task_id, **result.as_dict()}
 
     def requeue_dlq(
         self,
         queue_name: str,
         task_id: Optional[str] = None,
         reset_retry: bool = True,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         if task_id:
-            moved = int(self.requeue_task(queue_name, task_id, QueueState.dlq, reset_retry=reset_retry)["moved"])
+            record = self.get_task(task_id)
+            if record and str(record.get("outcome") or record.get("status")) in {
+                "failed",
+                "skipped",
+                "cancelled",
+            }:
+                result = self.replay_task(task_id, queue_name=queue_name)
+                return {"moved": int(result["accepted"]), **result}
+            moved = int(
+                self.requeue_task(
+                    queue_name,
+                    task_id,
+                    QueueState.dlq,
+                    reset_retry=reset_retry,
+                )["moved"]
+            )
             return {"moved": moved}
-        count = self._drain_list_to_ready(
-            f"{queue_name}:dlq", queue_name, update_status=True, reset_retry=reset_retry
-        )
+        count = self._smart_queue(queue_name).requeue_dlq(reset_retry=reset_retry)
         return {"moved": count}
 
     def requeue_task(
@@ -488,12 +684,29 @@ class QueueAdmin:
                     **guard,
                 }
 
+        if state == QueueState.dlq:
+            record = self.get_task(task_id)
+            if record and str(record.get("outcome") or record.get("status")) in {
+                "failed",
+                "skipped",
+                "cancelled",
+            }:
+                replay = self.replay_task(task_id, queue_name=queue_name)
+                return {
+                    "moved": int(replay["accepted"]),
+                    "task_id": task_id,
+                    "new_task_id": replay.get("task_id"),
+                    "queue": queue_name,
+                    "from_state": state.value,
+                }
+
         for key in self._state_keys(queue_name, state):
             if state == QueueState.delay:
                 for raw_msg, _score in self.r.zscan_iter(key):
                     if self._message_task_id(raw_msg) == task_id:
                         moved = self._move_delay_message(key, queue_name, raw_msg)
-                        self._update_history(task_id, {"status": "pending"})
+                        if moved:
+                            self._update_history(task_id, {"operational_message": 1})
                         return {
                             "moved": int(moved),
                             "task_id": task_id,
@@ -507,7 +720,8 @@ class QueueAdmin:
                             self._reset_message_retry(raw_msg) if reset_retry and state == QueueState.dlq else raw_msg
                         )
                         moved = self._move_list_message(key, queue_name, raw_msg, new_msg)
-                        self._update_history(task_id, {"status": "pending"})
+                        if moved:
+                            self._update_history(task_id, {"operational_message": 1})
                         return {
                             "moved": int(moved),
                             "task_id": task_id,
@@ -556,6 +770,7 @@ class QueueAdmin:
         task_id: str,
         queue_name: Optional[str] = None,
     ) -> Dict[str, int]:
+        record = self.get_task(task_id)
         queues = [queue_name] if queue_name else self.queue_names()
         queue_removed = 0
         for queue in queues:
@@ -571,6 +786,42 @@ class QueueAdmin:
                     queue_removed += self._remove_from_list_key(key, task_id)
             queue_removed += self._remove_from_delay_key(f"{queue}:delay", task_id)
 
+        identities_released = 0
+        if record:
+            logical_key = record.get("logical_key")
+            selected_queue = queue_name or record.get("_queue") or self._find_history_queue(task_id)
+            if logical_key and selected_queue:
+                smart_queue = self._smart_queue(str(selected_queue))
+                release_script = r"""
+                local kind = redis.call('TYPE', KEYS[1])
+                if type(kind) == 'table' then kind = kind['ok'] end
+                if kind == 'hash' and redis.call('HGET', KEYS[1], 'task_id') == ARGV[1] then
+                    return redis.call('DEL', KEYS[1])
+                end
+                if kind == 'string' and redis.call('GET', KEYS[1]) == ARGV[1] then
+                    return redis.call('DEL', KEYS[1])
+                end
+                return 0
+                """
+                identities_released += int(
+                    self.r.eval(
+                        release_script,
+                        1,
+                        smart_queue._dedup_key(str(logical_key)),
+                        task_id,
+                    )
+                    or 0
+                )
+                identities_released += int(
+                    self.r.eval(
+                        release_script,
+                        1,
+                        smart_queue._legacy_dedup_key(str(logical_key)),
+                        task_id,
+                    )
+                    or 0
+                )
+
         history_records = int(self.r.delete(f"qtask:task:{task_id}") or 0)
         history_indexes = 0
         for hist_key in self.r.scan_iter("qtask:hist:*"):
@@ -580,6 +831,7 @@ class QueueAdmin:
             "queue_messages": queue_removed,
             "history_records": history_records,
             "history_indexes": history_indexes,
+            "identities_released": identities_released,
         }
 
     def clear_queue(
@@ -587,44 +839,38 @@ class QueueAdmin:
         queue_name: str,
         include_dlq: bool = True,
         include_history: bool = False,
+        identity_policy: IdentityPolicy | str = IdentityPolicy.KEEP,
     ) -> Dict[str, int]:
-        keys = [queue_name, f"{queue_name}:retry", f"{queue_name}:delay"]
-        keys.extend(self.processing_keys(queue_name))
-        if include_dlq:
-            keys.append(f"{queue_name}:dlq")
-
-        deleted_keys = 0
-        for key in keys:
-            deleted_keys += int(self.r.delete(key) or 0)
-
+        queue = self._smart_queue(queue_name)
+        audit = queue.clear(include_dlq=include_dlq, identity_policy=identity_policy)
+        deleted_keys = int(audit["messages"])
         history_records = 0
         if include_history:
-            hist_key = f"qtask:hist:{queue_name}"
-            task_ids = self.r.zrange(hist_key, 0, -1)
-            history_records = len(task_ids)
-            if task_ids:
-                pipe = self.r.pipeline()
-                for task_id in task_ids:
-                    pipe.delete(f"qtask:task:{task_id}")
-                pipe.delete(hist_key)
-                pipe.execute()
-            else:
-                self.r.delete(hist_key)
+            history_records = int(self.r.zcard(queue.history.idx_key) or 0)
+            queue.history.clear()
 
-        return {"deleted_keys": deleted_keys, "history_records": history_records}
+        return {
+            "deleted_keys": deleted_keys,
+            "history_records": history_records,
+            "identity_released": int(IdentityPolicy(identity_policy) == IdentityPolicy.RELEASE),
+        }
 
     def delete_queue(self, queue_name: str) -> Dict[str, int]:
         """彻底删除队列及其所有关联数据（含历史记录），不可撤销。"""
-        deleted_keys = 0
-        keys_to_delete = [
-            queue_name,
-            f"{queue_name}:retry",
-            f"{queue_name}:dlq",
-            f"{queue_name}:delay",
-        ]
+        queue = self._smart_queue(queue_name)
+        cleared = queue.clear(include_dlq=True, identity_policy=IdentityPolicy.RELEASE)
+        deleted_keys = int(cleared["messages"])
+        keys_to_delete = [queue_name, f"{queue_name}:retry", f"{queue_name}:dlq", f"{queue_name}:delay"]
         keys_to_delete.extend(self.processing_keys(queue_name))
         for key in self.r.scan_iter(f"{queue_name}:worker:*"):
             keys_to_delete.append(key)
+        for pattern in (
+            f"{queue_name}:dedup:*",
+            f"{queue_name}:supersede:*",
+            f"{queue_name}:lease:*",
+        ):
+            keys_to_delete.extend(self.r.scan_iter(pattern))
+        keys_to_delete.append(f"qtask:metrics:{queue_name}")
 
         if keys_to_delete:
             deleted_keys += int(self.r.delete(*keys_to_delete) or 0)
@@ -642,6 +888,8 @@ class QueueAdmin:
             deleted_keys += sum(1 for r in results if r)
         else:
             deleted_keys += int(self.r.delete(hist_key) or 0)
+
+        self.r.zrem("qtask:queues", queue_name)
 
         return {"deleted_keys": deleted_keys, "history_records": history_records}
 
@@ -736,7 +984,7 @@ class QueueAdmin:
                 break
 
             for data in self._read_history_records(task_ids):
-                if data.get("status") != status:
+                if (data.get("outcome") or data.get("status")) != status:
                     continue
                 data["_queue"] = queue_name
                 data["_state"] = status
@@ -824,42 +1072,75 @@ class QueueAdmin:
             return cast(Dict[str, Any], parsed)
         return {"task_id": task_id, "_raw": raw_record}
 
+    def _read_deadline_missed(
+        self,
+        queue_name: str,
+        limit: int = 50,
+        scan_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """从 operational 容器派生 deadline_missed，不把它写成 lifecycle 状态。"""
+        if limit <= 0:
+            return []
+        effective_scan_limit = min(max(scan_limit or limit * 4, limit), 5000)
+        now = self.clock.now()
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        sources: list[tuple[str, str]] = [
+            (queue_name, "list"),
+            (f"{queue_name}:retry", "list"),
+            (f"{queue_name}:delay", "zset"),
+        ]
+        for source_key, source_type in sources:
+            if source_type == "zset":
+                messages = [raw for raw, _score in self.r.zrange(
+                    source_key,
+                    0,
+                    effective_scan_limit - 1,
+                    withscores=True,
+                )]
+            else:
+                messages = self.r.lrange(source_key, -effective_scan_limit, -1)
+            for raw_message in messages:
+                item = self._decode_message(
+                    str(raw_message),
+                    queue_name,
+                    QueueState.deadline_missed.value,
+                    source_key,
+                )
+                task_id = str(item.get("task_id") or "")
+                if not task_id or task_id in seen:
+                    continue
+                raw_data = item.get("_raw")
+                deadline: Any = None
+                if isinstance(raw_data, dict):
+                    deadline = raw_data.get("start_deadline_at") or raw_data.get("expires_at")
+                deadline_value = self._float_or_none(deadline)
+                if deadline_value is None or deadline_value >= now:
+                    continue
+                record = self.get_task(task_id)
+                outcome = (record or {}).get("outcome") or (record or {}).get("status")
+                if outcome in {"completed", "failed", "skipped", "cancelled"}:
+                    continue
+                item["deadline_missed"] = True
+                item["start_deadline_at"] = deadline_value
+                item["status"] = QueueState.deadline_missed.value
+                rows.append(item)
+                seen.add(task_id)
+                if len(rows) >= limit:
+                    return rows
+        return rows
+
     def _read_expired(
         self,
         queue_name: str,
         limit: int = 50,
         scan_limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        if limit <= 0:
-            return []
-
-        hist_key = f"qtask:hist:{queue_name}"
-        effective_scan_limit = scan_limit if scan_limit is not None else max(limit * 3, 300)
-        effective_scan_limit = min(max(effective_scan_limit, limit), 2000)
-        task_ids = self.r.zrevrange(hist_key, 0, effective_scan_limit - 1)
-        expired = []
-        now = time.time()
-        for task_id in task_ids:
-            data = self.get_task(task_id)
-            if not data:
-                continue
-            expires_at = data.get("expires_at")
-            status = data.get("status", "")
-            if (
-                expires_at
-                and float(expires_at) < now
-                and status not in ("completed", "failed")
-            ):
-                data["_queue"] = queue_name
-                data["_state"] = QueueState.expired.value
-                data["_source"] = hist_key
-                expired.append(data)
-            if len(expired) >= limit:
-                break
-        return expired
+        """deadline_missed 的兼容别名。"""
+        return self._read_deadline_missed(queue_name, limit=limit, scan_limit=scan_limit)
 
     def list_expired(self, queue_name: str, limit: int = 50) -> List[Dict[str, Any]]:
-        return self._read_expired(
+        return self._read_deadline_missed(
             queue_name,
             limit=limit,
             scan_limit=max(limit * 3, 300),
@@ -870,11 +1151,18 @@ class QueueAdmin:
         queue_name: str,
         task_id: Optional[str] = None,
         limit: int = 500,
+        start_deadline_at: datetime | str | float | None = None,
     ) -> Dict[str, Any]:
+        deadline = self._coerce_datetime(start_deadline_at)
+        if deadline is None:
+            return {
+                "moved": 0,
+                "note": "deadline_missed replay 必须显式提供新的 start_deadline_at",
+            }
         if task_id:
-            return self._requeue_single_expired(queue_name, task_id)
+            return self._requeue_single_expired(queue_name, task_id, deadline)
 
-        expired = self._read_expired(
+        expired = self._read_deadline_missed(
             queue_name,
             limit=limit,
             scan_limit=max(limit * 3, 500),
@@ -884,11 +1172,16 @@ class QueueAdmin:
             tid = task.get("task_id")
             if not tid:
                 continue
-            result = self._requeue_single_expired(queue_name, tid)
+            result = self._requeue_single_expired(queue_name, tid, deadline)
             moved += int(result["moved"])
-        return {"moved": moved}
+        return {"moved": moved, "start_deadline_at": deadline.isoformat()}
 
-    def _requeue_single_expired(self, queue_name: str, task_id: str) -> Dict[str, Any]:
+    def _requeue_single_expired(
+        self,
+        queue_name: str,
+        task_id: str,
+        start_deadline_at: datetime,
+    ) -> Dict[str, Any]:
         data = self.get_task(task_id)
         if not data:
             return {"moved": 0, "task_id": task_id}
@@ -902,62 +1195,48 @@ class QueueAdmin:
             }
 
         location = self._find_task_location(queue_name, task_id)
-        if location:
-            state, _source_key, _raw_msg = location
-            if state == QueueState.ready:
-                updated = int(self._update_history(task_id, {"status": "pending", "expires_at": ""}))
-                return {
-                    "moved": 0,
-                    "updated": updated,
-                    "task_id": task_id,
-                    "queue": queue_name,
-                    "from_state": state.value,
-                    "note": "任务已在 ready 队列，仅清除过期标记",
-                }
-            if state == QueueState.processing:
-                return {
-                    "moved": 0,
-                    "task_id": task_id,
-                    "queue": queue_name,
-                    "from_state": state.value,
-                    "note": "任务仍在 processing，未自动重放以避免抢占活跃 Worker",
-                }
-
-            result = self.requeue_task(queue_name, task_id, state)
-            if result["moved"]:
-                self._update_history(task_id, {"status": "pending", "expires_at": ""})
-            return result
-
-        if "payload" not in data:
+        if not location:
             return {
                 "moved": 0,
                 "task_id": task_id,
                 "queue": queue_name,
-                "note": "历史记录不含 payload，未重建任务",
+                "note": "任务没有 operational message，无法安全取消后 replay",
             }
-
-        payload = data.get("payload")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except (json.JSONDecodeError, TypeError):
-                payload = None
-        if not isinstance(payload, dict):
+        state, source_key, raw_message = location
+        if state == QueueState.processing:
             return {
                 "moved": 0,
                 "task_id": task_id,
                 "queue": queue_name,
-                "note": "历史记录不含可重放 payload，未重建任务",
+                "note": "processing 任务不属于 deadline_missed 派生视图",
             }
-        if isinstance(payload, dict) and data.get("action") and not payload.get("action"):
-            payload["action"] = data["action"]
-        msg = json.dumps({
+        queue = self._smart_queue(queue_name)
+        source_type = "zset" if state == QueueState.delay else "list"
+        removed = queue._cancel_or_purge(
+            source_key,
+            source_type,
+            raw_message,
+            IdentityPolicy.KEEP,
+            reason="deadline_missed task replaced by explicit replay",
+        )
+        if not removed:
+            return {"moved": 0, "task_id": task_id, "queue": queue_name}
+        try:
+            replay = queue.replay_task(task_id, start_deadline_at=start_deadline_at)
+        except Exception as exc:
+            return {
+                "moved": 0,
+                "task_id": task_id,
+                "queue": queue_name,
+                "note": f"旧任务已取消，但 replay 失败: {exc}",
+            }
+        return {
+            "moved": int(replay.accepted),
             "task_id": task_id,
-            "payload": payload if isinstance(payload, str) else json.dumps(payload),
-        })
-        self.r.lpush(queue_name, msg)
-        self._update_history(task_id, {"status": "pending", "expires_at": ""})
-        return {"moved": 1, "task_id": task_id, "queue": queue_name}
+            "new_task_id": replay.task_id,
+            "queue": queue_name,
+            "from_state": state.value,
+        }
 
     def _find_task_location(
         self,
@@ -1006,6 +1285,35 @@ class QueueAdmin:
 
         if not isinstance(data, dict):
             item["_raw"] = data
+            return item
+
+        if int(data.get("version", 1) or 1) == 2:
+            descriptor = data.get("payload", {})
+            payload = descriptor
+            if isinstance(descriptor, dict) and descriptor.get("kind") == "inline":
+                payload = descriptor.get("data")
+            item.update(
+                {
+                    "task_id": data.get("task_id", ""),
+                    "action": data.get("action", ""),
+                    "payload": payload,
+                    "payload_kind": descriptor.get("kind", "")
+                    if isinstance(descriptor, dict)
+                    else "",
+                    "attempt": int(data.get("attempt", 0) or 0),
+                    "retry": max(int(data.get("attempt", 0) or 0) - 1, 0),
+                    "logical_key": data.get("logical_key"),
+                    "scheduled_for": data.get("scheduled_for"),
+                    "start_deadline_at": data.get("start_deadline_at"),
+                    "delay_reason": data.get("delay_reason", ""),
+                    "available_at": data.get("available_at"),
+                    "trace_id": data.get("trace_id"),
+                    "parent_task_id": data.get("parent_task_id"),
+                    "replay_of": data.get("replay_of"),
+                    "status": state,
+                    "_raw": data,
+                }
+            )
             return item
 
         payload_raw = data.get("payload", {})
@@ -1121,7 +1429,19 @@ class QueueAdmin:
 
     def _smart_queue(self, queue_name: str) -> SmartQueue:
         namespace, short_name = self._split_queue_name(queue_name)
-        return SmartQueue(self.redis_url, short_name, namespace=namespace or None, redis_client=self.r)
+        return SmartQueue(
+            self.redis_url,
+            short_name,
+            namespace=namespace or None,
+            redis_client=self.r,
+            storage=self.storage,
+            max_attempts=self.max_attempts,
+            retry_backoff_base=self.retry_backoff_base,
+            retry_backoff_max=self.retry_backoff_max,
+            ttl_days=self.ttl_days,
+            history_mode=self.history_mode,
+            clock=self.clock,
+        )
 
     def _update_history(self, task_id: str, fields: Dict[str, Any]) -> bool:
         record = self.get_task(task_id)
@@ -1138,22 +1458,22 @@ class QueueAdmin:
             return 0
         now = time.time()
         queue = self._smart_queue(queue_name)
-        ttl_seconds = queue.history.ttl_seconds
         idx_key = queue.history.idx_key
         lua_script = """
         if redis.call('EXISTS', KEYS[1]) == 0 then
             return 0
         end
-        redis.call('HSET', KEYS[1], 'status', ARGV[2], 'updated_at', ARGV[1])
-        redis.call('EXPIRE', KEYS[1], ARGV[3])
-        redis.call('ZADD', KEYS[2], ARGV[1], ARGV[4])
-        redis.call('EXPIRE', KEYS[2], ARGV[3])
+        local outcome = redis.call('HGET', KEYS[1], 'outcome') or ''
+        if outcome ~= '' and outcome ~= 'none' then return 0 end
+        redis.call('HSET', KEYS[1], 'operational_message', '1', 'updated_at', ARGV[1])
+        redis.call('PERSIST', KEYS[1])
+        redis.call('ZADD', KEYS[2], 'NX', ARGV[1], ARGV[2])
         return 1
         """
         pipe = self.r.pipeline()
         for task_id in task_ids:
             key = f"qtask:task:{task_id}"
-            pipe.eval(lua_script, 2, key, idx_key, now, "pending", ttl_seconds, task_id)
+            pipe.eval(lua_script, 2, key, idx_key, now, task_id)
         results = pipe.execute()
         return sum(int(result or 0) for result in results)
 
@@ -1179,14 +1499,32 @@ class QueueAdmin:
 
     @staticmethod
     def _is_expired_record(data: Dict[str, Any]) -> bool:
-        expires_at = data.get("expires_at")
-        status = data.get("status", "")
-        if not expires_at or status in ("completed", "failed"):
+        expires_at = data.get("start_deadline_at") or data.get("expires_at")
+        outcome = data.get("outcome") or data.get("status", "")
+        if not expires_at or outcome in ("completed", "failed", "skipped", "cancelled"):
             return False
         try:
             return float(expires_at) < time.time()
         except (TypeError, ValueError):
             return False
+
+    @staticmethod
+    def _coerce_datetime(value: datetime | str | float | None) -> datetime | None:
+        """管理入口接受 aware datetime、ISO 8601 或 epoch，统一成 aware datetime。"""
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            result = value
+        elif isinstance(value, (int, float)):
+            result = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        elif isinstance(value, str):
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            result = datetime.fromisoformat(normalized)
+        else:
+            raise TypeError("datetime value must be datetime, ISO string, epoch or None")
+        if result.tzinfo is None or result.utcoffset() is None:
+            raise ValueError("datetime value must be timezone-aware")
+        return result
 
     def _list_contains_qtask_message(self, key: str) -> bool:
         try:

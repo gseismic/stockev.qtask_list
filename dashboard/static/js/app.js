@@ -42,9 +42,23 @@ function App() {
     const [toast, setToast] = useState("");
     const [loadingAction, setLoadingAction] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [payloadText, setPayloadText] = useState('{\n  "action": "example"\n}');
+    const [payloadText, setPayloadText] = useState('{\n  "symbol": "SSE:600000"\n}');
     const [delaySeconds, setDelaySeconds] = useState(0);
     const [expireSeconds, setExpireSeconds] = useState(0);
+    const [pushOptions, setPushOptions] = useState({
+        action: "example",
+        logicalKey: "",
+        scheduledFor: "",
+        notBeforeAt: "",
+        startDeadlineAt: "",
+        dedupUntil: "",
+        traceId: "",
+        parentTaskId: "",
+        concurrencyKey: "",
+        supersedeKey: "",
+        supersedeVersion: "",
+        allowNew: false,
+    });
 
     const rankedQueues = useMemo(() => [...queues].sort(compareQueues), [queues]);
 
@@ -61,6 +75,38 @@ function App() {
         setToast(message);
         window.setTimeout(() => setToast(""), 2500);
     }, []);
+
+    const updatePushOption = useCallback((name, value) => {
+        setPushOptions((current) => ({ ...current, [name]: value }));
+    }, []);
+
+    function toIso(value) {
+        if (!value) return null;
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) throw new Error(`无效时间：${value}`);
+        return parsed.toISOString();
+    }
+
+    function promptFutureDeadline(message) {
+        const suggested = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        const value = window.prompt(message, suggested);
+        if (value === null) return null;
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+            notify("新的最晚开始时间必须是未来的有效时间");
+            return null;
+        }
+        return parsed.toISOString();
+    }
+
+    function taskDeadlineHasPassed(task) {
+        const value = task.start_deadline_at;
+        if (!value) return false;
+        const milliseconds = typeof value === "number" || /^\d+(\.\d+)?$/.test(String(value))
+            ? Number(value) * 1000
+            : new Date(value).getTime();
+        return Number.isFinite(milliseconds) && milliseconds <= Date.now();
+    }
 
     const loadQueues = useCallback(async () => {
         const data = await api.queues();
@@ -137,9 +183,10 @@ function App() {
     async function runAction(action, successMessage, actionName) {
         setLoadingAction(actionName || null);
         try {
-            await action();
-            notify(successMessage);
+            const result = await action();
+            notify(typeof successMessage === "function" ? successMessage(result) : successMessage);
             await refresh();
+            return result;
         } catch (error) {
             notify(error.message);
         } finally {
@@ -148,8 +195,17 @@ function App() {
     }
 
     const retryQueue = (queue) => runAction(() => api.retryQueue(queue), "retry 已移回 ready", "retry");
-    const requeueDlq = (queue) => runAction(() => api.requeueDlq(queue), "DLQ 已重放", "requeueDlq");
-    const requeueExpired = (queue) => runAction(() => api.requeueExpired(queue), "过期任务已放回", "requeueExpired");
+    const requeueDlq = (queue) => {
+        if (confirmDanger("批量重放会为每个死信任务创建新 task_id，继续？")) {
+            runAction(() => api.requeueDlq(queue), "DLQ 已重放为新实例", "requeueDlq");
+        }
+    };
+    const requeueExpired = (queue) => {
+        const deadline = promptFutureDeadline("为这些任务输入新的最晚开始时间（ISO 8601）：");
+        if (deadline) {
+            runAction(() => api.requeueExpired(queue, deadline), "超期任务已重放为新实例", "requeueExpired");
+        }
+    };
     const recoverQueue = (queue, includeActive) => runAction(
         () => api.recoverQueue(queue, includeActive),
         includeActive ? "已强制恢复 processing" : "已恢复 stale processing",
@@ -160,9 +216,16 @@ function App() {
             recoverQueue(queue, true);
         }
     };
-    const clearQueue = (queue) => {
-        if (confirmDanger("清空队列会删除 ready/processing/retry/delay/DLQ，继续？")) {
-            runAction(() => api.clearQueue(queue, true, false), "队列已清空", "clear");
+    const clearQueue = (queue, releaseIdentity = false) => {
+        const message = releaseIdentity
+            ? "清空队列并释放 logical identity 会允许同一业务任务再次投递，继续？"
+            : "清空队列会取消 operational message，但保留 logical identity，继续？";
+        if (confirmDanger(message)) {
+            runAction(
+                () => api.clearQueue(queue, true, false, releaseIdentity),
+                releaseIdentity ? "队列已清空，身份已释放" : "队列已清空，身份仍保留",
+                releaseIdentity ? "clearRelease" : "clear"
+            );
         }
     };
     const deleteQueue = (queue) => {
@@ -172,11 +235,40 @@ function App() {
     };
     const requeueTask = (task) => {
         const fromState = taskState(task);
+        const outcome = task.outcome || task.status;
         const queue = task._queue || effectiveQueue;
         if (fromState === "processing" && !confirmDanger("从 processing 重试可能影响正在运行的 Worker，继续？")) {
             return;
         }
-        runAction(() => api.requeueTask(task.task_id, queue, fromState), "任务已重试", "requeueTask");
+        if (fromState === "deadline_missed") {
+            const deadline = promptFutureDeadline("为重放实例输入新的最晚开始时间（ISO 8601）：");
+            if (deadline) {
+                runAction(
+                    () => api.requeueExpired(queue, deadline, task.task_id),
+                    (result) => `已创建重放实例 ${result.new_task_id || ""}`.trim(),
+                    "requeueTask"
+                );
+            }
+            return;
+        }
+        if (["failed", "skipped", "cancelled"].includes(outcome)) {
+            let deadline = null;
+            if (taskDeadlineHasPassed(task)) {
+                deadline = promptFutureDeadline("原任务的最晚开始时间已过，请输入新时间（ISO 8601）：");
+                if (!deadline) return;
+            }
+            runAction(
+                () => api.replayTask(task.task_id, { queue, start_deadline_at: deadline }),
+                (result) => `已创建重放实例 ${result.task_id || ""}`.trim(),
+                "requeueTask"
+            );
+            return;
+        }
+        runAction(
+            () => api.requeueTask(task.task_id, queue, fromState),
+            (result) => result.new_task_id ? `已创建重放实例 ${result.new_task_id}` : "任务已移回待处理",
+            "requeueTask"
+        );
     };
     const deleteTask = (task) => {
         const queue = task._queue || effectiveQueue;
@@ -193,9 +285,39 @@ function App() {
     const pushTask = (queue) => {
         try {
             const payload = JSON.parse(payloadText);
-            runAction(() => api.pushTask(queue, payload, delaySeconds, expireSeconds), "任务已投递", "push");
+            if (!payload || Array.isArray(payload) || typeof payload !== "object") {
+                throw new Error("payload 必须是 JSON object");
+            }
+            if (pushOptions.allowNew && !confirmDanger("ALLOW_NEW 会绕过去重并替换 logical identity owner，继续？")) {
+                return;
+            }
+            const body = {
+                payload,
+                action: pushOptions.action.trim() || payload.action || null,
+                delay_seconds: delaySeconds,
+                expire_seconds: expireSeconds,
+                logical_key: pushOptions.logicalKey.trim() || null,
+                scheduled_for: toIso(pushOptions.scheduledFor),
+                not_before_at: toIso(pushOptions.notBeforeAt),
+                start_deadline_at: toIso(pushOptions.startDeadlineAt),
+                dedup_until: toIso(pushOptions.dedupUntil),
+                trace_id: pushOptions.traceId.trim() || null,
+                parent_task_id: pushOptions.parentTaskId.trim() || null,
+                concurrency_key: pushOptions.concurrencyKey.trim() || null,
+                supersede_key: pushOptions.supersedeKey.trim() || null,
+                supersede_version: pushOptions.supersedeVersion.trim() || null,
+                duplicate_action: pushOptions.allowNew ? "allow_new" : "reject",
+                confirm_duplicate: pushOptions.allowNew,
+            };
+            runAction(
+                () => api.pushTask(queue, body),
+                (result) => result.accepted
+                    ? `任务已投递：${result.task_id}`
+                    : `未投递：${result.reason}，已有 ${result.duplicate_of || "任务"}`,
+                "push"
+            );
         } catch (error) {
-            notify(`Payload JSON 无效：${error.message}`);
+            notify(`投递参数无效：${error.message}`);
         }
     };
     const logout = async () => {
@@ -219,6 +341,9 @@ function App() {
         history: 0,
         completed: 0,
         failed: 0,
+        skipped: 0,
+        cancelled: 0,
+        deadline_missed: 0,
         expired: 0,
         active_workers: 0,
     };
@@ -310,9 +435,11 @@ function App() {
                             payloadText,
                             delaySeconds,
                             expireSeconds,
+                            options: pushOptions,
                             onPayload: setPayloadText,
                             onDelay: setDelaySeconds,
                             onExpire: setExpireSeconds,
+                            onOption: updatePushOption,
                             onPush: pushTask,
                             key: "push",
                         }),

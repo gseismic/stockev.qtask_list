@@ -144,15 +144,17 @@ export function GlobalOverview({ queues }) {
         delay: acc.delay + Number(q.delay || 0),
         completed: acc.completed + Number(q.completed || 0),
         failed: acc.failed + Number(q.failed || 0),
-        expired: acc.expired + Number(q.expired || 0),
-    }), { queue: 0, processing: 0, retry: 0, dlq: 0, delay: 0, completed: 0, failed: 0, expired: 0 });
+        cancelled: acc.cancelled + Number(q.cancelled || 0),
+        deadline_missed: acc.deadline_missed + Number(q.deadline_missed || 0),
+    }), { queue: 0, processing: 0, retry: 0, dlq: 0, delay: 0, completed: 0, failed: 0, cancelled: 0, deadline_missed: 0 });
 
     const items = [
         { label: "待处理", value: totals.queue, tone: totals.queue > 0 ? "warn" : "" },
         { label: "处理中", value: totals.processing },
         { label: "已完成", value: totals.completed, tone: totals.completed > 0 ? "ok" : "" },
         { label: "已失败", value: totals.failed, tone: totals.failed > 0 ? "fail" : "" },
-        { label: "已过期", value: totals.expired, tone: totals.expired > 0 ? "warn" : "" },
+        { label: "错过截止", value: totals.deadline_missed, tone: totals.deadline_missed > 0 ? "warn" : "" },
+        { label: "已取消", value: totals.cancelled },
         { label: "重试", value: totals.retry },
         { label: "死信", value: totals.dlq, tone: totals.dlq > 0 ? "fail" : "" },
     ].filter(item => item.value > 0 || item.tone);
@@ -182,7 +184,8 @@ export function StatsGrid({ stats }) {
         { label: "已失败", value: stats.failed, tone: Number(stats.failed || 0) > 0 ? "danger" : "" },
         { label: "待重试", value: stats.retry, tone: Number(stats.retry || 0) > 0 ? "warning" : "" },
         { label: "死信", value: stats.dlq, tone: Number(stats.dlq || 0) > 0 ? "danger" : "" },
-        { label: "已过期", value: stats.expired, tone: Number(stats.expired || 0) > 0 ? "warning" : "" },
+        { label: "错过截止", value: stats.deadline_missed, tone: Number(stats.deadline_missed || 0) > 0 ? "warning" : "" },
+        { label: "已取消", value: stats.cancelled },
         { label: "延迟", value: stats.delay },
         {
             label: "Worker",
@@ -235,7 +238,7 @@ export function QueueActions({ queue, stats, readOnly, loading, onRetry, onReque
     const retryDisabled = Number(stats.retry || 0) === 0;
     const dlqDisabled = Number(stats.dlq || 0) === 0;
     const processingDisabled = Number(stats.processing || 0) === 0;
-    const expiredDisabled = Number(stats.expired || 0) === 0;
+    const expiredDisabled = Number(stats.deadline_missed || 0) === 0;
     const isBusy = !!loading;
 
     return h("div", { className: "button-row" }, [
@@ -264,9 +267,9 @@ export function QueueActions({ queue, stats, readOnly, loading, onRetry, onReque
             className: `btn${loading === "requeueExpired" ? " loading" : ""}`,
             disabled: readOnly || expiredDisabled || isBusy,
             onClick: () => onRequeueExpired(queue),
-            title: readOnly ? "连接异常时不能执行写操作" : (expiredDisabled ? "没有过期任务" : "将过期任务放回待处理"),
+            title: readOnly ? "连接异常时不能执行写操作" : (expiredDisabled ? "没有错过截止的任务" : "以新 task_id 和新截止时间重放"),
             key: "expired",
-        }, loading === "requeueExpired" ? "处理中…" : "放回过期"),
+        }, loading === "requeueExpired" ? "处理中…" : "重放超期"),
     ]);
 }
 
@@ -294,6 +297,13 @@ export function DangerActions({ queue, stats, readOnly, loading, onRecoverActive
                     title: readOnly ? "连接异常时不能执行写操作" : (clearDisabled ? "当前没有可清空的任务" : "清空当前生命周期队列"),
                     key: "clear",
                 }, loading === "clear" ? "处理中…" : "清空队列"),
+                h("button", {
+                    className: `btn danger${loading === "clearRelease" ? " loading" : ""}`,
+                    disabled: readOnly || clearDisabled || isBusy,
+                    onClick: () => onClear(queue, true),
+                    title: readOnly ? "连接异常时不能执行写操作" : (clearDisabled ? "当前没有可清空的任务" : "清空队列并释放 logical identity"),
+                    key: "clear-release",
+                }, loading === "clearRelease" ? "处理中…" : "清空并释放身份"),
             ]),
         ]),
     ]);
@@ -407,7 +417,7 @@ export function TaskTable({ tasks, state, stats, search, readOnly, loading, onVi
                     h("td", {}, task.action || "-"),
                     h("td", { className: "payload-cell" }, summarize(task.payload ?? task)),
                     h("td", { className: "muted" }, formatTime(task.created_at)),
-                    h("td", { className: "muted" }, task.status === "completed" || task.status === "failed" ? formatTime(task.updated_at) : "-"),
+                    h("td", { className: "muted" }, ["completed", "failed", "skipped", "cancelled"].includes(task.status || task.outcome) ? formatTime(task.updated_at || task.finished_at) : "-"),
                 ]);
             })),
         ])
@@ -519,8 +529,19 @@ export function TaskDrawer({ task, readOnly, loading, onClose, onRequeue, onDele
     ]);
 }
 
-export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySeconds, expireSeconds, onPayload, onDelay, onExpire, onPush }) {
+export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySeconds, expireSeconds, options, onPayload, onDelay, onExpire, onOption, onPush }) {
     const isBusy = !!loading;
+    const textOption = (name, label, type = "text") => h("label", { className: "field", key: name }, [
+        h("span", { className: "field-label", key: "label" }, label),
+        h("input", {
+            className: "input",
+            type,
+            value: options[name] || "",
+            disabled: readOnly || isBusy,
+            onChange: (event) => onOption(name, event.target.value),
+            key: "input",
+        }),
+    ]);
     return h("details", { className: "panel push-panel" }, [
         h("summary", { className: "panel-summary", key: "summary" }, "投递任务"),
         h("div", { className: "panel-body", key: "body" }, [
@@ -532,6 +553,32 @@ export function PushTaskForm({ queue, readOnly, loading, payloadText, delaySecon
                 onChange: (event) => onPayload(event.target.value),
                 key: "payload",
             }),
+            h("details", { className: "advanced-options", key: "advanced" }, [
+                h("summary", { className: "muted", key: "summary" }, "高级任务语义"),
+                h("div", { className: "advanced-grid", key: "grid" }, [
+                    textOption("action", "Action（默认 payload.action）"),
+                    textOption("logicalKey", "Logical key"),
+                    textOption("scheduledFor", "计划时刻", "datetime-local"),
+                    textOption("notBeforeAt", "最早开始", "datetime-local"),
+                    textOption("startDeadlineAt", "最晚开始", "datetime-local"),
+                    textOption("dedupUntil", "去重保留至", "datetime-local"),
+                    textOption("traceId", "Trace ID"),
+                    textOption("parentTaskId", "Parent task ID"),
+                    textOption("concurrencyKey", "Concurrency key"),
+                    textOption("supersedeKey", "Supersede key"),
+                    textOption("supersedeVersion", "Supersede version"),
+                    h("label", { className: "field checkbox-field", key: "allowNew" }, [
+                        h("input", {
+                            type: "checkbox",
+                            checked: !!options.allowNew,
+                            disabled: readOnly || isBusy,
+                            onChange: (event) => onOption("allowNew", event.target.checked),
+                            key: "input",
+                        }),
+                        h("span", { key: "label" }, "允许同 logical key 新实例（危险）"),
+                    ]),
+                ]),
+            ]),
             h("div", { className: "button-row", style: { marginTop: "10px" }, key: "row" }, [
                 h("input", {
                     className: "input",
