@@ -1,139 +1,53 @@
 # Examples
 
-本目录包含 `qtask_list` V2 的使用示例。示例默认连接 `redis://localhost:6379/0`，
-需要先启动 Redis；所有生产任务都用 `TaskSpec` 表达身份、时间窗口和血缘。
+`qtask_list` 分层示例：从最简生产/消费到生产级模式，按编号递进学习。
+所有示例默认连接 `redis://localhost:6379/0`，需要先启动 Redis。
+
+## 学习路径
+
+| 目录 | 主题 | 运行方式 |
+|---|---|---|
+| `01_basics/` | 最简生产/消费（裸 SmartQueue，理解可靠消费模型） | 2 个终端 |
+| `02_worker/` | Worker + handler 注册 + 错误分类与重试 | 2 个终端 |
+| `03_retry_dlq/` | 重试退避、DLQ 全流程与 replay | 1 条命令 |
+| `04_delay_deadline/` | 延迟执行 vs 业务截止时间 | 1 条命令 |
+| `05_idempotency/` | logical_key 身份、两段去重、EnqueueResult | 1 条命令 |
+| `06_pipeline/` | 三级跨 namespace 流水线（emissions 级联） | 4 个终端 |
+| `07_advanced/` | 确定性调度、动态 fan-out、Reconciler | 各自独立 |
+| `08_large_payload/` | 大 payload 自动外存（RemoteStorage） | 3 个终端 |
+| `09_admin_ops/` | QueueAdmin 诊断、查任务、重放、恢复 | 2 个终端 |
+
+每个目录内的 README.md 有详细的运行步骤与学习点说明，请先阅读。
 
 ## 快速开始
 
-### 股票数据 Pipeline
+```bash
+pip install -e .
 
-完整的 3 阶段 pipeline，涉及 2 个 namespace：
-
-```
-stockev_list:fetch → finance:calculate → stockev_list:store
-```
-
-**架构图：**
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    股票数据 Pipeline                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   [Generator]                                              │
-│   python examples/generator.py                                │
-│         │                                                   │
-│         ▼                                                   │
-│   ┌─────────────────┐                                        │
-│   │ stockev_list:  │                                        │
-│   │ fetch (10个)   │                                        │
-│   └────────┬────────┘                                        │
-│            │                                                 │
-│            ▼                                                 │
-│   ┌─────────────────┐         ┌─────────────────┐          │
-│   │ stockev/       │────────▶│ finance/        │          │
-│   │ fetch_worker   │         │ calculate_worker │          │
-│   └─────────────────┘         └────────┬────────┘          │
-│                                      │                     │
-│                                      ▼                     │
-│   ┌─────────────────┐         ┌─────────────────┐          │
-│   │ stockev/       │◀────────│ finance/        │          │
-│   │ store_worker   │         │ calculate_worker │          │
-│   └─────────────────┘         └─────────────────┘          │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+# 最简体验（01_basics）
+python examples/01_basics/consumer.py   # 终端 1
+python examples/01_basics/producer.py   # 终端 2
 ```
 
-**运行步骤：**
+## 核心概念对照
+
+| 概念 | 示例 |
+|---|---|
+| 可靠消费（BRPOPLPUSH + processing + ack） | 01 |
+| 错误分类（Retryable / Permanent） | 02 |
+| 状态机（delay / retry_wait / dlq / deadline_missed） | 03, 04 |
+| 任务身份与幂等（logical_key / dedup_until） | 05, 07 |
+| TaskResult.emissions 级联投递 | 06 |
+| TaskContext（attempt / trace / 协作停止） | 06, 07 |
+| RemoteStorage 透明外存 | 08 |
+| QueueAdmin 管理 API | 09 |
+
+## 调试工具
 
 ```bash
-# 终端1: store worker (stockev namespace)
-python examples/stockev/store_worker.py
-
-# 终端2: calculate worker (finance namespace)
-python examples/finance/calculate_worker.py
-
-# 终端3: fetch worker (stockev namespace)
-python examples/stockev/fetch_worker.py
-
-# 终端4: 生成任务（V2 enqueue_many）
-python examples/generator.py
-```
-
-### 确定性 5 分钟调度
-
-`stockev/scheduler.py` 将 UTC 时间向下规整到 5 分钟 slot，并为早盘/午盘任务设置
-`logical_key`、历史分区和 `start_deadline_at`。cron 每 5 分钟调用即可安全重跑：
-
-```bash
-python examples/stockev/scheduler.py --session am
-python examples/stockev/scheduler.py --session pm
-```
-
-### 新闻发现 fan-out
-
-`stockev/news_discover.py` 展示双参数 handler 如何读取 `TaskContext`，再通过
-`TaskResult.emissions` 将 URL 拆成带 `news:<sha256>` 身份的 `fetch_news` 任务。
-
-### Reconciler 补齐
-
-`stockev/reconciler.py` 从 JSONL 期望清单调用 `QueueAdmin.enqueue_many()`。重复运行只会
-得到 `duplicate_active`/`duplicate_retained`，不会直接修改 Redis key：
-
-```bash
-python examples/stockev/reconciler.py
-python examples/stockev/reconciler.py --manifest examples/stockev/tasks.jsonl
-```
-
-## 目录结构
-
-```
-examples/
-├── README.md                    # 本文件
-├── generator.py                 # 生成任务
-│
-├── stockev/                    # stockev namespace workers
-│   ├── fetch_worker.py         # 爬取数据，TaskResult fan-out
-│   ├── store_worker.py         # 存储结果
-│   ├── scheduler.py            # 5 分钟 slot + 早晚 universe
-│   ├── news_discover.py        # 新闻发现与 fan-out
-│   └── reconciler.py           # 期望清单幂等补齐
-│
-└── finance/                    # finance namespace workers
-    └── calculate_worker.py    # 计算 MA
-```
-
-## 任务流转
-
-| 阶段 | 队列 | Namespace | Action | Worker |
-|------|------|-----------|--------|--------|
-| 1 | fetch | stockev_list | fetch_stock | stockev/fetch_worker.py |
-| 2 | calculate | finance | calculate_ma | finance/calculate_worker.py |
-| 3 | store | stockev_list | store_result | stockev/store_worker.py |
-
-## CLI 常用命令
-
-```bash
-# 查看队列状态
-python -m cli status
-
-# 实时监控
-python -m cli watch stockev_list:fetch
-
-# 查看历史
-python -m cli history stockev_list:fetch
-
-# 清理过期历史
-python -m cli clean-history stockev_list:fetch
-```
-
-## 自定义
-
-修改 `examples/generator.py` 中的 `symbols` 列表来更改股票代码：
-
-```python
-symbols = [
-    "AAPL", "TSLA", "NVDA", "MSFT", "GOOG",
-    "AMZN", "META", "NFLX", "AMD", "INTC",
-]
+python -m cli status                          # 所有队列状态
+python -m cli watch demo:jobs                 # 实时监控某队列
+python -m cli peek demo:jobs --state dlq      # 查看死信
+python -m cli history demo:jobs -l 20         # 任务历史
+python -m cli dashboard                       # Web 控制台
 ```
