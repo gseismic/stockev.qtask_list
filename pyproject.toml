@@ -47,7 +47,7 @@ where = ["."]
 include = ["qtask_list*", "cli*", "dashboard*", "remote_storage*"]
 
 [tool.setuptools.package-data]
-dashboard = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
+dashboard = ["templates/*.html", "static/css/*.css", "static/spa/*", "static/spa/assets/*"]
 
 [tool.ruff]
 line-length = 100

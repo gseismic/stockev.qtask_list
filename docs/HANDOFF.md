@@ -1,7 +1,7 @@
 # 交接文档（HANDOFF）
 
-- 更新时间：2026-09-21 14:45（Asia/Shanghai）
-- 当前基线：`9c430dd`（docs: 设计稿 V1 新增教程页 + KPI 卡可下钻，已 push）
+- 更新时间：2026-09-21 17:10（Asia/Shanghai）
+- 当前基线：PLAN-017 React 管理后台已实施（见 docs/dev/INDEX.md）
 - 交接范围：qtask_list V2 核心、管理后台、前端、测试、文档、stockev 示例，以及
   管理后台 UI 重设计设计稿（本轮新工作）
 - 工作树保护：`AGENTS.md` 是用户已有未提交修改，始终不修改、不暂存、不提交
@@ -76,18 +76,16 @@ FastAPI Dashboard（`dashboard/`，Jinja + 原生 JS 单页）、Python SDK。
 
 ## 4. 验证基线
 
-本轮只改了 `docs/`，未动代码，以下命令仍应保持通过；实施新代码前先跑一遍：
-
 ```bash
 python -m pytest tests/ -q
 python -m ruff check .
 python -m mypy qtask_list cli dashboard remote_storage
-for f in dashboard/static/js/*.js; do node --check "$f"; done
 python -m compileall -q examples
+# 前端（PLAN-017 起）：源码 frontend/，构建产物提交在 dashboard/static/spa/
+cd frontend && npm run build
 ```
 
-Redis 默认连接 `redis://localhost:6379/0`。手工脚本
-`tests/manual/verify_review_claims.py`，运行后必须检查测试 namespace 已清理。
+Redis 默认连接 `redis://localhost:6379/0`。
 
 ## 5. 后续可选方向（按优先级）
 

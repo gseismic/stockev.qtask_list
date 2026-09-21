@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 import redis
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -37,6 +37,16 @@ monitor = Monitor(redis_client)
 BASE_DIR = os.path.dirname(__file__)
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
+# React SPA 构建产物（frontend/ 构建，输出到 static/spa）
+SPA_DIR = os.path.join(BASE_DIR, "static", "spa")
+SPA_INDEX = os.path.join(SPA_DIR, "index.html")
+if os.path.isdir(os.path.join(SPA_DIR, "assets")):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(SPA_DIR, "assets")),
+        name="spa_assets",
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -460,7 +470,27 @@ def index(request: Request):
     settings = get_auth_settings()
     if settings.enabled and not is_request_authenticated(request):
         return RedirectResponse("/login")
-    return templates.TemplateResponse("index.html", {"request": request})
+    return FileResponse(SPA_INDEX)
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def spa_fallback(full_path: str):
+    """SPA 客户端路由回退：非 API 路径返回静态文件或 index.html。"""
+    if full_path.startswith(("api/", "static/", "assets/")):
+        raise HTTPException(status_code=404, detail="Not Found")
+    candidate = os.path.realpath(os.path.join(SPA_DIR, full_path))
+    if candidate.startswith(os.path.realpath(SPA_DIR) + os.sep) and os.path.isfile(candidate):
+        return FileResponse(candidate)
+    return FileResponse(SPA_INDEX)
+
+
+@app.post("/api/queue/{name}/clean-history")
+def api_clean_history(
+    name: str,
+    ttl_days: int = Query(15, ge=0, description="保留最近 N 天历史"),
+    _auth: None = Depends(require_auth),
+):
+    return admin.clean_history(name, ttl_days=ttl_days)
 
 
 if __name__ == "__main__":

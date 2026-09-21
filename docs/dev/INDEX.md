@@ -31,3 +31,9 @@
 - 计划文件：`PLAN-016-v2-review-remediation.md`
 - 结果文件：`PLAN-016-v2-review-remediation-OUTCOME.md`
 - 摘要：修复 V1/V2 管理兼容、retry_wait 注入统计、REST 4xx、Worker 优雅停止信号和前端计数；迁移全量测试与手工脚本，新增 TaskSpec 调度、新闻 fan-out、Reconciler 示例，并同步 README/skill。验证与提交推送结果见结果文件。
+
+## 2026-09-21 17:05
+
+- 计划文件：`PLAN-017-dashboard-react.md`
+- 结果文件：`PLAN-017-dashboard-react-OUTCOME.md`
+- 摘要：按 `docs/ui-design/v1/` 设计稿实施 React 版管理后台（frontend/，Vite+React+TS，构建产物入库 dashboard/static/spa/）：总览进度矩阵、队列列表/详情、全局任务视图+详情抽屉、Worker 监控、告警中心（前端规则引擎+localStorage）、教程页、双主题；后端增量 SPA 托管与 clean-history 接口，退役旧 Jinja+原生 JS 单页。pytest 118 passed，ruff/mypy/build 通过，浏览器端到端验证后测试数据已清理。
