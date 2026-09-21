@@ -9,15 +9,31 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
 /* ============ tokens ============ */
+/* 默认白天（浅色）；html[data-theme=dark] 切换黑夜 */
 :root{
+  --bg-base:#f6f8fa; --bg-surface:#ffffff; --bg-surface-2:#eef1f4;
+  --border-default:#d0d7de;
+  --text-primary:#1f2328; --text-secondary:#57606a; --text-faint:#6e7781;
+  --c-primary:#0969da; --c-success:#1a7f37; --c-warning:#9a6700; --c-danger:#cf222e; --c-muted:#6e7781;
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:18px; --fs-xl:24px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
+  --r-sm:4px; --r-md:6px; --r-lg:8px;
+  --shadow-1:0 1px 3px rgba(31,35,40,.1); --shadow-2:0 8px 24px rgba(31,35,40,.18);
+  --hover:rgba(31,35,40,.05); --primary-dim:rgba(9,105,218,.09);
+  --overlay:rgba(31,35,40,.45);
+  --danger-dim:rgba(207,34,46,.08); --danger-border:rgba(207,34,46,.45);
+  --sk-a:#eef1f4; --sk-b:#e2e7ec;
+}
+html[data-theme="dark"]{
   --bg-base:#0d1117; --bg-surface:#161b22; --bg-surface-2:#1c2129;
   --border-default:#30363d;
   --text-primary:#e6edf3; --text-secondary:#9198a1; --text-faint:#6e7681;
   --c-primary:#2f81f7; --c-success:#3fb950; --c-warning:#d29922; --c-danger:#f85149; --c-muted:#8b949e;
-  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:18px; --fs-xl:24px;
-  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
-  --r-sm:4px; --r-md:6px; --r-lg:8px;
   --shadow-1:0 1px 3px rgba(0,0,0,.4); --shadow-2:0 8px 24px rgba(0,0,0,.5);
+  --hover:rgba(255,255,255,.04); --primary-dim:rgba(47,129,247,.08);
+  --overlay:rgba(0,0,0,.55);
+  --danger-dim:rgba(248,81,73,.12); --danger-border:rgba(248,81,73,.4);
+  --sk-a:#1c2129; --sk-b:#242a33;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg-base);color:var(--text-primary);font:var(--fs-sm)/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
@@ -32,14 +48,14 @@ a{color:var(--c-primary);text-decoration:none;cursor:pointer}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:var(--r-md);border:1px solid var(--border-default);background:var(--bg-surface-2);font-size:var(--fs-md)}
 .btn:hover{border-color:var(--text-faint)}
 .btn.primary{background:var(--c-primary);border-color:var(--c-primary);color:#fff}
-.btn.danger{color:var(--c-danger);border-color:rgba(248,81,73,.4)}
-.btn.danger:hover{background:rgba(248,81,73,.12)}
+.btn.danger{color:var(--c-danger);border-color:var(--danger-border)}
+.btn.danger:hover{background:var(--danger-dim)}
 .btn.sm{padding:2px 8px;font-size:var(--fs-xs)}
 .card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-md)}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 @keyframes breathe{50%{opacity:.4}}
 .dot.pulse{animation:breathe 1.6s infinite}
-.skeleton{background:linear-gradient(90deg,var(--bg-surface-2) 25%,#242a33 50%,var(--bg-surface-2) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:var(--r-sm)}
+.skeleton{background:linear-gradient(90deg,var(--sk-a) 25%,var(--sk-b) 50%,var(--sk-a) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:var(--r-sm)}
 @keyframes sk{to{background-position:-200% 0}}
 
 /* ============ layout ============ */
@@ -48,8 +64,8 @@ a{color:var(--c-primary);text-decoration:none;cursor:pointer}
 .sidenav .logo{padding:0 var(--sp-4) var(--sp-4);border-bottom:1px solid var(--border-default);font-weight:600;font-size:var(--fs-md)}
 .sidenav .logo small{display:block;color:var(--text-faint);font-weight:400;font-size:var(--fs-xs)}
 .navitem{display:flex;align-items:center;gap:10px;padding:8px var(--sp-4);color:var(--text-secondary);font-size:var(--fs-md);border-left:2px solid transparent;text-align:left;width:100%}
-.navitem:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
-.navitem.active{color:var(--text-primary);border-left-color:var(--c-primary);background:rgba(47,129,247,.08)}
+.navitem:hover{color:var(--text-primary);background:var(--hover)}
+.navitem.active{color:var(--text-primary);border-left-color:var(--c-primary);background:var(--primary-dim)}
 .navitem .count{margin-left:auto;background:var(--c-danger);color:#fff;font-size:var(--fs-xs);border-radius:10px;padding:0 6px;font-weight:600}
 .main{flex:1;padding:var(--sp-5) var(--sp-6);min-width:0}
 .topbar{display:flex;align-items:center;gap:var(--sp-4);margin-bottom:var(--sp-5)}
@@ -67,7 +83,7 @@ a{color:var(--c-primary);text-decoration:none;cursor:pointer}
 table{width:100%;border-collapse:collapse}
 th{font-size:var(--fs-xs);color:var(--text-secondary);text-align:left;padding:8px 12px;background:var(--bg-surface-2);border-bottom:1px solid var(--border-default);font-weight:500;position:sticky;top:0}
 td{padding:9px 12px;border-bottom:1px solid var(--border-default);font-size:var(--fs-sm)}
-tbody tr:hover{background:rgba(255,255,255,.02);cursor:pointer}
+tbody tr:hover{background:var(--hover);cursor:pointer}
 
 /* tabs */
 .tabs{display:flex;gap:2px;border-bottom:1px solid var(--border-default);margin-bottom:var(--sp-4);flex-wrap:wrap}
@@ -77,14 +93,14 @@ tbody tr:hover{background:rgba(255,255,255,.02);cursor:pointer}
 .tab .n{color:var(--c-danger);font-weight:600}
 
 /* drawer */
-.drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:40}
+.drawer-mask{position:fixed;inset:0;background:var(--overlay);z-index:40}
 .drawer{position:fixed;top:0;right:0;bottom:0;width:560px;background:var(--bg-surface);border-left:1px solid var(--border-default);box-shadow:var(--shadow-2);z-index:41;display:flex;flex-direction:column}
 .drawer .hd{padding:var(--sp-4);border-bottom:1px solid var(--border-default)}
 .drawer .bd{flex:1;overflow:auto;padding:var(--sp-4)}
 .drawer .ft{padding:var(--sp-4);border-top:1px solid var(--border-default);display:flex;gap:var(--sp-2)}
 .sec{margin-bottom:var(--sp-4)}
 .sec h3{font-size:var(--fs-md);margin-bottom:var(--sp-2);color:var(--text-secondary);font-weight:600}
-pre.json{background:var(--bg-base);border:1px solid var(--border-default);border-radius:var(--r-sm);padding:var(--sp-3);font-size:var(--fs-xs);overflow:auto;max-height:220px;color:#a5d6ff}
+pre.json{background:var(--bg-base);border:1px solid var(--border-default);border-radius:var(--r-sm);padding:var(--sp-3);font-size:var(--fs-xs);overflow:auto;max-height:220px;color:var(--c-primary)}
 
 /* timeline */
 .tl{list-style:none}
@@ -100,10 +116,10 @@ pre.json{background:var(--bg-base);border:1px solid var(--border-default);border
 .alert-item .meta{font-size:var(--fs-xs);color:var(--text-faint);margin-top:2px}
 
 /* banner */
-.banner{display:flex;align-items:center;gap:var(--sp-3);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.4);color:var(--c-danger);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-4);margin-bottom:var(--sp-4);font-size:var(--fs-sm)}
+.banner{display:flex;align-items:center;gap:var(--sp-3);background:var(--danger-dim);border:1px solid var(--danger-border);color:var(--c-danger);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-4);margin-bottom:var(--sp-4);font-size:var(--fs-sm)}
 
 /* modal */
-.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center}
+.modal-mask{position:fixed;inset:0;background:var(--overlay);z-index:50;display:flex;align-items:center;justify-content:center}
 .modal{width:420px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-lg);box-shadow:var(--shadow-2);padding:var(--sp-5)}
 .modal h3{margin-bottom:var(--sp-3);font-size:var(--fs-lg)}
 .modal p{color:var(--text-secondary);margin-bottom:var(--sp-3);font-size:var(--fs-sm)}
@@ -116,7 +132,7 @@ pre.json{background:var(--bg-base);border:1px solid var(--border-default);border
 .demo-bar button.on{background:var(--c-primary);color:#fff}
 .menu{position:absolute;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-md);box-shadow:var(--shadow-2);min-width:180px;z-index:30;padding:4px 0}
 .menu button{display:block;width:100%;text-align:left;padding:7px 14px;font-size:var(--fs-sm);color:var(--text-primary)}
-.menu button:hover{background:rgba(255,255,255,.04)}
+.menu button:hover{background:var(--hover)}
 .menu button.dz{color:var(--c-danger)}
 .menu .sep{border-top:1px solid var(--border-default);margin:4px 0}
 .empty{padding:var(--sp-6);text-align:center;color:var(--text-secondary)}
@@ -147,12 +163,21 @@ const Skeleton=({h=14,w="100%",style})=><div className="skeleton" style={{height
 
 // ---------- 全局状态（页面级 demo） ----------
 const DEMO={ // mock 数据，正式实现来自 /api/*
+  // 多 namespace、几十到上百条抓取队列的规模演示（此处 3 组 12 条 + 折叠提示）
+  // done1h=最近 1 小时完成数；rate=最近完成速率(条/min)——正式实现由前端周期采样差值估算
   queues:[
-    {name:"stockev:day-kline:fetch",stats:{ready:120,processing:4,retry_wait:6,delay:0,dlq:0,completed:8421,failed:168},fail_rate:.02},
-    {name:"stockev:quote:5min",stats:{ready:8,processing:2,retry_wait:3,delay:12,dlq:1,completed:15230,failed:96},fail_rate:.01},
-    {name:"stockev:news:discover",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:312,failed:0},fail_rate:0},
-    {name:"stockev:news:fetch",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:1204,failed:2},fail_rate:0},
-    {name:"stockev:store",stats:{ready:2,processing:1,retry_wait:0,delay:0,dlq:0,completed:15022,failed:12},fail_rate:0},
+    {name:"stockev:quote:5min",ns:"stockev",stats:{ready:240,processing:8,retry_wait:6,delay:12,dlq:1,completed:15230,failed:96},fail_rate:.006,done1h:720,rate:12},
+    {name:"stockev:quote:1min",ns:"stockev",stats:{ready:96,processing:6,retry_wait:3,delay:0,dlq:0,completed:22010,failed:150},fail_rate:.007,done1h:960,rate:16},
+    {name:"stockev:day-kline:fetch",ns:"stockev",stats:{ready:120,processing:4,retry_wait:6,delay:0,dlq:0,completed:8421,failed:168},fail_rate:.02,done1h:480,rate:8},
+    {name:"stockev:adjust:dividend",ns:"stockev",stats:{ready:12,processing:1,retry_wait:0,delay:0,dlq:0,completed:512,failed:3},fail_rate:.006,done1h:66,rate:1.1},
+    {name:"stockev:universe:am",ns:"stockev",stats:{ready:500,processing:0,retry_wait:0,delay:0,dlq:0,completed:88,failed:1},fail_rate:.011,done1h:20,rate:0},
+    {name:"stockev:store",ns:"stockev",stats:{ready:2,processing:1,retry_wait:0,delay:0,dlq:0,completed:15022,failed:12},fail_rate:.001,done1h:940,rate:15.7},
+    {name:"news:discover",ns:"news",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:312,failed:0},fail_rate:0,done1h:0,rate:0},
+    {name:"news:fetch",ns:"news",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:1204,failed:2},fail_rate:.002,done1h:0,rate:0},
+    {name:"bf:kline:2024",ns:"backfill",stats:{ready:6200,processing:35,retry_wait:12,delay:0,dlq:0,completed:3100,failed:52},fail_rate:.017,done1h:2700,rate:45},
+    {name:"bf:kline:2023",ns:"backfill",stats:{ready:8600,processing:30,retry_wait:8,delay:0,dlq:0,completed:2400,failed:41},fail_rate:.017,done1h:2200,rate:37},
+    {name:"bf:tick:2024H1",ns:"backfill",stats:{ready:420,processing:18,retry_wait:2,delay:0,dlq:3,completed:980,failed:22},fail_rate:.022,done1h:610,rate:10.2},
+    {name:"bf:tick:2023H1",ns:"backfill",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:150,failed:0},fail_rate:0,done1h:0,rate:0},
   ],
   workers:[
     {worker_id:"fetch-3",queue:"stockev:quote:5min",heartbeat:"2s 前",stale:false,processing:2},
@@ -193,15 +218,40 @@ function SideNav(){
     </div>
   </nav>;
 }
+function ThemeToggle(){
+  const {theme,setTheme}=React.useContext(AppCtx);
+  const dark=theme==="dark";
+  return <button className="btn sm" title="切换白天/黑夜模式" onClick={()=>setTheme(dark?"light":"dark")}>{dark?"切换白天":"切换黑夜"}</button>;
+}
 function TopBar({title,children}){
-  return <div className="topbar"><h1>{title}</h1>{children}</div>;
+  return <div className="topbar"><h1>{title}</h1>{children}<ThemeToggle/></div>;
 }
 
-// ---------- 总览 ----------
+// ---------- 进度工具 ----------
+const remaining=q=>q.stats.ready+q.stats.processing+(q.stats.retry_wait||0)+(q.stats.delay||0);
+const etaText=q=>{const rem=remaining(q);if(rem<=0)return"完成";if(!q.rate)return"停滞";const m=rem/q.rate;return m<1?"<1min":m<60?`约 ${Math.round(m)}min`:`约 ${(m/60).toFixed(1)}h`;};
+const isAbnormal=q=>q.stats.dlq>0||q.fail_rate>.05||(!q.rate&&remaining(q)>0);
+const healthOf=q=>q.stats.dlq>0?["danger",`DLQ ${q.stats.dlq}`]:(!q.rate&&remaining(q)>0)?["danger","停滞"]:q.fail_rate>.05?["warning","失败率"]:remaining(q)>0?["success","进行中"]:["muted","空闲"];
+function ProgressBar({q,w=120}){
+  const rem=remaining(q),tot=q.done1h+rem||1;
+  const dw=Math.min(100,q.done1h/tot*100),rw=rem/tot*100,dw2=Math.min(100-q.done1h/tot*100,q.stats.dlq/tot*100);
+  return <div style={{display:"flex",alignItems:"center",gap:8}}>
+    <div style={{display:"flex",height:6,flex:`0 0 ${w}px`,background:"var(--bg-base)",borderRadius:3,overflow:"hidden"}}>
+      <div style={{width:`${dw}%`,background:"var(--c-success)"}}/>
+      <div style={{width:`${rw}%`,background:"var(--c-primary)",opacity:.35}}/>
+      {q.stats.dlq>0&&<div style={{width:`${dw2}%`,background:"var(--c-danger)"}}/>}
+    </div>
+    <span className="num faint" style={{fontSize:"var(--fs-xs)"}}>{Math.round(q.done1h/tot*100)}%</span>
+  </div>;
+}
+
+// ---------- 总览（进度总览） ----------
 function OverviewPage(){
-  const {queues,alerts,workers,mode}=React.useContext(AppCtx);
-  const dlqTotal=queues.reduce((a,q)=>a+q.stats.dlq,0);
-  const stale=workers.filter(w=>w.stale).length;
+  const {queues,alerts,mode}=React.useContext(AppCtx);
+  const active=queues.filter(q=>remaining(q)>0).length;
+  const totalRem=queues.reduce((a,q)=>a+remaining(q),0);
+  const totalRate=queues.reduce((a,q)=>a+q.rate,0);
+  const abnormal=queues.filter(isAbnormal).length;
   return <div>
     <TopBar title="总览"><span className="faint" style={{fontSize:"var(--fs-xs)"}}>自动刷新 5s · 上次 10:02:31</span></TopBar>
     {mode==="error"&&<div className="banner">⚠ Redis 连接失败: Connection refused — <a>重试</a></div>}
@@ -209,10 +259,10 @@ function OverviewPage(){
       {mode==="loading"
         ? [0,1,2,3].map(i=><div key={i} className="card kpi"><Skeleton h={28} w={60}/><div style={{marginTop:8}}><Skeleton h={10} w={80}/></div></div>)
         : <>
-        <div className="card kpi"><div className="lbl">队列</div><div className="v num">{queues.length}</div></div>
-        <div className="card kpi" style={dlqTotal?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">DLQ 总量</div><div className="v num" style={dlqTotal?{color:"var(--c-danger)"}:null}>{dlqTotal}</div></div>
-        <div className="card kpi" style={stale?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">失联 Worker</div><div className="v num" style={stale?{color:"var(--c-danger)"}:null}>{stale}</div></div>
-        <div className="card kpi"><div className="lbl">Redis 内存</div><div className="v num">{DEMO.redis.pct}%</div><div style={{fontSize:"var(--fs-xs)"}} className="faint">1.2G / 2G 阈值</div></div>
+        <div className="card kpi"><div className="lbl">活跃队列</div><div className="v num">{active}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}>/{queues.length}</span></div></div>
+        <div className="card kpi"><div className="lbl">总剩余（待执行）</div><div className="v num">{totalRem.toLocaleString()}</div></div>
+        <div className="card kpi"><div className="lbl">合计完成速率</div><div className="v num">{totalRate.toFixed(0)}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}> 条/min</span></div></div>
+        <div className="card kpi" style={abnormal?{borderColor:"var(--danger-border)"}:null}><div className="lbl">异常队列</div><div className="v num" style={abnormal?{color:"var(--c-danger)"}:null}>{abnormal}</div></div>
       </>}
     </div>
     <div className="card" style={{marginBottom:"var(--sp-5)"}}>
@@ -228,21 +278,49 @@ function OverviewPage(){
 }
 function QueueHealthMatrix(){
   const {queues,mode,setPage}=React.useContext(AppCtx);
-  const sorted=[...queues].sort((a,b)=>(b.stats.dlq-a.stats.dlq)||(b.fail_rate-a.fail_rate));
+  const [view,setView]=useState("all");
+  const [collapsed,setCollapsed]=useState(()=>{const byNs={};queues.forEach(q=>byNs[q.ns]=(byNs[q.ns]||0)+remaining(q));const c={};Object.entries(byNs).forEach(([g,v])=>{if(v===0)c[g]=true});return c;});
+  const withMeta=queues.map(q=>({...q,rem:remaining(q)}));
+  const filtered=withMeta.filter(q=>view==="all"||(view==="active"?q.rem>0:isAbnormal(q)));
+  const groups={};filtered.forEach(q=>{(groups[q.ns]=groups[q.ns]||[]).push(q)});
+  const gkeys=Object.keys(groups).sort();
+  const toggle=g=>setCollapsed(c=>({...c,[g]:!c[g]}));
   return <div className="card">
-    <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border-default)",fontWeight:600,fontSize:"var(--fs-md)"}}>队列健康矩阵</div>
+    <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border-default)",display:"flex",alignItems:"center",gap:"var(--sp-4)"}}>
+      <span style={{fontWeight:600,fontSize:"var(--fs-md)"}}>队列进度矩阵</span>
+      <span style={{flex:1}}/>
+      {["all","active","abnormal"].map(f=><button key={f} className="btn sm" style={view===f?{borderColor:"var(--c-primary)",color:"var(--c-primary)"}:null} onClick={()=>setView(f)}>{({all:"全部",active:"进行中",abnormal:"仅异常"})[f]}</button>)}
+      <span className="faint" style={{fontSize:"var(--fs-xs)"}} title="绿=最近 1h 完成，蓝=剩余（ready+processing+retry_wait+delay），红=DLQ">进度条说明</span>
+    </div>
     {mode==="loading"
       ? <div style={{padding:16}}>{[0,1,2].map(i=><Skeleton key={i} h={20} style={{marginBottom:12}}/>)}</div>
       : mode==="empty" ? <div className="empty"><div className="big">还没有队列</div>用 <code>qtask push</code> 或在队列页投递第一条任务，这里会出现队列健康概览。</div>
-      : <table><thead><tr><th>队列</th><th className="num">ready</th><th className="num">processing</th><th className="num">retry_wait</th><th className="num">dlq</th><th className="num">失败率</th><th>健康</th></tr></thead>
-      <tbody>{sorted.map(q=><tr key={q.name} onClick={()=>setPage("detail")}>
-        <td style={{fontWeight:500}}>{q.name}</td>
-        <td className="num">{q.stats.ready}</td><td className="num">{q.stats.processing}</td>
-        <td className="num">{q.stats.retry_wait||"-"}</td>
-        <td className="num" style={q.stats.dlq?{color:"var(--c-danger)",fontWeight:600}:null}>{q.stats.dlq}</td>
-        <td className="num">{(q.fail_rate*100).toFixed(1)}%</td>
-        <td>{q.stats.dlq>0?<Badge c="danger">DLQ ⚠</Badge>:q.fail_rate>.05?<Badge c="warning">失败率</Badge>:q.stats.ready+q.stats.processing>0?<Badge c="success">正常</Badge>:<Badge c="muted">空闲</Badge>}</td>
-      </tr>)}</tbody></table>}
+      : <table><thead><tr><th>队列</th><th>进度</th><th className="num">剩余</th><th className="num">完成/1h</th><th className="num">速率/min</th><th>预计完成</th><th>状态</th></tr></thead>
+      <tbody>{gkeys.map(g=>{
+        const gq=groups[g];
+        const gRem=gq.reduce((a,q)=>a+q.rem,0),gDone=gq.reduce((a,q)=>a+q.done1h,0);
+        const gAbn=gq.filter(isAbnormal).length;
+        const sorted=[...gq].sort((a,b)=>(isAbnormal(b)-isAbnormal(a))||(b.rem-a.rem));
+        const isCol=collapsed[g];
+        return [
+          <tr key={`g-${g}`} className="group-row" onClick={()=>toggle(g)} style={{cursor:"pointer",background:"var(--bg-surface-2)"}}>
+            <td colSpan={7} style={{fontWeight:600,fontSize:"var(--fs-xs)",padding:"7px 12px",color:"var(--text-secondary)"}}>
+              {isCol?"▸":"▾"} {g} · {gq.length} 个队列 · 剩余 {gRem.toLocaleString()} · 完成/1h {gDone.toLocaleString()}{gAbn>0?` · ⚠ ${gAbn} 个异常`:null}
+            </td>
+          </tr>,
+          ...(!isCol?sorted.map(q=>{
+            const [hc,ht]=healthOf(q);
+            return <tr key={q.name} onClick={()=>setPage("detail")}>
+            <td style={{fontWeight:500}}>{q.name}</td>
+            <td><ProgressBar q={q}/></td>
+            <td className="num" style={q.rem>0?{color:"var(--c-primary)",fontWeight:600}:null}>{q.rem||"-"}</td>
+            <td className="num">{q.done1h||"-"}</td>
+            <td className="num">{q.rate||"-"}</td>
+            <td className="num" style={!q.rate&&q.rem>0?{color:"var(--c-danger)",fontWeight:600}:null}>{etaText(q)}</td>
+            <td><Badge c={hc}>{ht}</Badge></td>
+          </tr>;}):[])
+        ];
+      })}</tbody></table>}
   </div>;
 }
 
@@ -250,15 +328,20 @@ function QueueHealthMatrix(){
 function QueueListPage(){
   const {queues,mode,confirm}=React.useContext(AppCtx);
   const [filter,setFilter]=useState("all");
+  const [ns,setNs]=useState("all");
   const [menu,setMenu]=useState(null);
-  const list=queues.filter(q=>filter==="all"||(filter==="active"?q.stats.ready+q.stats.processing>0:q.stats.dlq>0||q.fail_rate>.05));
+  const nss=[...new Set(queues.map(q=>q.ns))];
+  const list=queues.filter(q=>(ns==="all"||q.ns===ns)&&(filter==="all"||(filter==="active"?remaining(q)>0:isAbnormal(q))));
   return <div>
     <TopBar title="队列">
       <button className="btn primary" onClick={()=>confirm("投递测试任务","向选定队列投递一条测试任务（可设置 delay 与 expire_seconds）。")}>+ 投递测试任务</button>
     </TopBar>
     <div className="row" style={{marginBottom:"var(--sp-4)"}}>
-      {["all","active","abnormal"].map(f=><button key={f} className="btn sm" style={filter===f?{borderColor:"var(--c-primary)",color:"var(--c-primary)"}:null} onClick={()=>setFilter(f)}>{({all:"全部",active:"有活动",abnormal:"仅异常"})[f]}</button>)}
+      <select value={ns} onChange={e=>setNs(e.target.value)}>{["all",...nss].map(v=><option key={v} value={v}>{v==="all"?"全部 namespace":v}</option>)}</select>
+      {["all","active","abnormal"].map(f=><button key={f} className="btn sm" style={filter===f?{borderColor:"var(--c-primary)",color:"var(--c-primary)"}:null} onClick={()=>setFilter(f)}>{({all:"全部",active:"进行中",abnormal:"仅异常"})[f]}</button>)}
       <input placeholder="搜索队列名…" style={{width:220}}/>
+      <span style={{flex:1}}/>
+      <span className="faint" style={{fontSize:"var(--fs-xs)"}}>共 {list.length} 个队列</span>
     </div>
     {mode==="loading"?<div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16}}>{[0,1,2,3,4,5].map(i=><div key={i} className="card" style={{padding:16,height:120}}><Skeleton/><div style={{marginTop:12}}><Skeleton h={10}/></div></div>)}</div>
     :mode==="empty"?<div className="card empty"><div className="big">没有队列</div>通过 SmartQueue.push 或下方按钮投递第一条任务，队列会自动出现。</div>
@@ -266,13 +349,15 @@ function QueueListPage(){
       {list.map(q=><div key={q.name} className="card" style={{padding:"var(--sp-4)"}}>
         <div className="row" style={{justifyContent:"space-between",marginBottom:8}}>
           <span style={{fontWeight:600,fontSize:"var(--fs-md)"}}>{q.name}</span>
-          {q.stats.dlq>0?<Badge c="danger">DLQ ⚠</Badge>:q.fail_rate>.05?<Badge c="warning">失败率</Badge>:<Badge c="success">正常</Badge>}
+          {(()=>{const [hc,ht]=healthOf(q);return <Badge c={hc}>{ht}</Badge>;})()}
         </div>
-        <div className="row" style={{gap:16,fontSize:"var(--fs-xs)",color:"var(--text-secondary)",marginBottom:"var(--sp-3)"}}>
-          <span>ready <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.ready}</b></span>
-          <span>processing <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.processing}</b></span>
-          <span>retry_wait <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.retry_wait}</b></span>
-          <span>dlq <b className="num" style={q.stats.dlq?{color:"var(--c-danger)"}:{color:"var(--text-primary)"}}>{q.stats.dlq}</b></span>
+        <ProgressBar q={q} w={200} style={{}}/>
+        <div className="row" style={{gap:16,fontSize:"var(--fs-xs)",color:"var(--text-secondary)",margin:"10px 0 var(--sp-3)"}}>
+          <span>剩余 <b className="num" style={remaining(q)>0?{color:"var(--c-primary)"}:null}>{remaining(q)}</b></span>
+          <span>完成/1h <b className="num">{q.done1h}</b></span>
+          <span>速率 <b className="num">{q.rate}/min</b></span>
+          <span>ETA <b className="num">{etaText(q)}</b></span>
+          {q.stats.dlq>0&&<span style={{color:"var(--c-danger)"}}>dlq <b className="num">{q.stats.dlq}</b></span>}
         </div>
         <div className="row" style={{position:"relative"}}>
           <button className="btn sm primary" onClick={()=>{}}>详情</button>
@@ -367,7 +452,7 @@ function WorkersPage(){
     <TopBar title="Worker"/>
     <div className="kpis">
       <div className="card kpi"><div className="lbl">在线</div><div className="v num" style={{color:"var(--c-success)"}}>{workers.length-stale}</div></div>
-      <div className="card kpi" style={stale?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">失联</div><div className="v num" style={stale?{color:"var(--c-danger)"}:null}>{stale}</div></div>
+      <div className="card kpi" style={stale?{borderColor:"var(--danger-border)"}:null}><div className="lbl">失联</div><div className="v num" style={stale?{color:"var(--c-danger)"}:null}>{stale}</div></div>
       <div className="card kpi"><div className="lbl">processing 总数</div><div className="v num">{workers.reduce((a,w)=>a+w.processing,0)}</div></div>
       <div className="card kpi"><div className="lbl">Redis 内存</div><div className="v num">62%</div></div>
     </div>
@@ -482,7 +567,13 @@ function App(){
   const [drawer,setDrawer]=useState(null);
   const [dialog,setDialog]=useState(null);
   const [mode,setMode]=useState("default");
+  const [theme,setTheme]=useState(()=>{try{return localStorage.getItem("qtask-theme")||"light"}catch(e){return "light"}});
+  useEffect(()=>{
+    document.documentElement.dataset.theme=theme;
+    try{localStorage.setItem("qtask-theme",theme)}catch(e){}
+  },[theme]);
   const ctx={page,setPage,queues:DEMO.queues,workers:DEMO.workers,alerts:DEMO.alerts,tasks:DEMO.tasks,mode,
+    theme,setTheme,
     drawer,dialog,openDrawer:setDrawer,closeDrawer:()=>setDrawer(null),
     confirm:(title,body)=>setDialog({title,body}),closeDialog:()=>setDialog(null)};
   return <AppCtx.Provider value={ctx}>

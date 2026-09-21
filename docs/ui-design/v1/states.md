@@ -36,7 +36,16 @@
 - `replay_of` 显示"由任务 xxx 重放而来"链接；`replayed_by` 显示"已重放为 xxx"。
 - 非终态任务显示"下次执行预估"（delay ZSET score）。
 
-## 3. 告警规则 `[假设阈值，待校准]`
+## 3. 进度口径与告警规则
+
+### 3.1 进度口径（多队列盯盘，见 pages/01-overview.md）
+
+- 剩余 = ready + processing + retry_wait + delay（`queue_stats`，现有能力）。
+- 完成/1h、速率（条/min）= 前端对 `/api/queues` 的周期采样差值估算 `[假设]`；冷启动两个采样周期内显示"—"。
+- ETA = 剩余 / 速率；速率=0 且剩余>0 判定"停滞"（danger）。
+- "本轮期望总量"百分比分母：**开放问题**——若调度器/期望清单（如 reconciler JSONL、scheduler 每轮 universe）能提供每轮应完成数，增加接口 `/api/queue/{name}/progress` 后切换为"完成/期望"；V1 先用吞吐相对进度。
+
+### 3.2 告警规则 `[假设阈值，待校准]`
 
 数据全部来自现有 API 能力（`get_health` / `list_queues` / `queue_stats` / `list_workers` / `diagnose`），不要求新增后端。
 
