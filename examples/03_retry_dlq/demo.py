@@ -5,7 +5,7 @@
     python examples/03_retry_dlq/demo.py
 
 注意：本脚本假设 demo:dlq-demo 队列为空；若上次运行中断，先清理：
-    python -m cli clear demo:dlq-demo --include-history --force
+    python -m qtask_list.cli clear demo:dlq-demo --include-history --force
 
 流程说明：
 1. 投递一个必然失败的任务（max_attempts=2）
@@ -93,7 +93,7 @@ def main() -> None:
         queue.ack(raw_msg)
         print("  已 ack，本次演示结束")
 
-    print(f"\n原始失败记录: python -m cli history -t {task_id}")
+    print(f"\n原始失败记录: python -m qtask_list.cli history -t {task_id}")
 
 
 if __name__ == "__main__":

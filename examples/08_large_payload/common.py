@@ -3,7 +3,7 @@
 需要三个终端（需要本地 Redis）::
 
     # 终端 1：启动外存服务端（qtask_list[storage] 依赖）
-    python -m remote_storage.server --port 8096
+    python -m qtask_list.remote_storage.server --port 8096
 
     # 终端 2：启动消费者
     python examples/08_large_payload/consumer.py

@@ -56,7 +56,7 @@ pip install -e ".[storage]"       # RemoteStorage 服务端支持
 | `storage.py` | `RemoteStorage` | HTTP 客户端，大于 50KB 的 payload 自动外存 |
 | `archiver.py` | `ArchiveManager` | Redis 任务历史 → SQLite 归档 |
 | `archiver.py` | `Monitor` | Redis `INFO MEMORY` 内存监控 |
-| `cli/__main__.py` | Typer CLI | 任务生命周期控制台：push/peek/status/requeue/retry/recover/history/task/worker/archive/monitor/dashboard |
+| `cli/__main__.py`（`qtask_list/cli/`） | Typer CLI | 任务生命周期控制台：push/peek/status/requeue/retry/recover/history/task/worker/archive/monitor/dashboard |
 
 ### 队列结构
 
@@ -576,18 +576,18 @@ pip install "qtask_list[dashboard]"
 export QTASK_DASHBOARD_USER=admin
 export QTASK_DASHBOARD_PASSWORD='<strong-password>'
 export QTASK_DASHBOARD_SECRET='<random-secret>'
-uvicorn dashboard.main:app --host 0.0.0.0 --port 8765
+uvicorn qtask_list.dashboard.main:app --host 0.0.0.0 --port 8765
 ```
 
 ### 修改前端（仅开发 Dashboard 时需要）
 
-前端源码在 `frontend/`（Vite + React + TypeScript），构建产物提交在 `dashboard/static/spa/`，因此使用与部署都不依赖 Node。只有改前端时才需要：
+前端源码在 `qtask_list/frontend/`（Vite + React + TypeScript + pnpm），构建产物提交在 `qtask_list/dashboard/static/spa/`，因此使用与部署都不依赖 Node。只有改前端时才需要：
 
 ```bash
-cd frontend
-npm install
-npm run dev      # 开发模式，代理 /api 到本机 8765 的后端
-npm run build    # 构建并输出到 dashboard/static/spa/，随包提交
+cd qtask_list/frontend
+pnpm install
+pnpm dev         # 开发模式，代理 /api 到本机 8765 的后端
+pnpm build       # 构建并输出到 qtask_list/dashboard/static/spa/，随包提交
 ```
 
 ## 配置参数
@@ -624,23 +624,19 @@ export QTASK_DASHBOARD_SECURE_COOKIE=1
 
 ```
 qtask_list/
-├── qtask_list/           # 核心库
-│   ├── __init__.py       # 公开 API: SmartQueue, Worker, RemoteStorage
-│   ├── queue.py          # SmartQueue — 5 子队列管理
-│   ├── worker.py         # Worker — 三线程任务处理器
-│   ├── history.py        # TaskHistory — Redis 任务历史
-│   ├── storage.py        # RemoteStorage — 大文件 HTTP 外存
-│   └── archiver.py       # ArchiveManager (SQLite 归档) + Monitor (内存监控)
-├── cli/
-│   └── __main__.py       # Typer CLI (qtask / qtask_list 命令)
-├── dashboard/
-│   ├── main.py           # FastAPI 后端（API + SPA 托管）
-│   ├── templates/        # 登录页模板
-│   ├── static/css/       # 登录页样式
-│   └── static/spa/       # React Dashboard 构建产物（frontend/ 构建输出）
-├── frontend/             # Dashboard 前端源码（Vite + React + TS，改前端才需要）
-├── examples/             # 使用示例
-├── tests/                # 测试用例
-├── pyproject.toml        # 项目配置与依赖
+├── qtask_list/              # 包根
+│   ├── queue.py             # SmartQueue — 5 子队列管理
+│   ├── worker.py            # Worker — 三线程任务处理器
+│   ├── history.py           # TaskHistory — Redis 任务历史
+│   ├── storage.py           # RemoteStorage — 大文件 HTTP 外存
+│   ├── archiver.py          # ArchiveManager (SQLite 归档) + Monitor (内存监控)
+│   ├── cli/                 # Typer CLI (qtask / qtask_list 命令)
+│   ├── dashboard/           # FastAPI 后端（API + SPA 托管）+ templates/static
+│   │   └── static/spa/      # React Dashboard 构建产物（frontend/ 构建输出）
+│   ├── remote_storage/      # 外存服务端（python -m qtask_list.remote_storage.server）
+│   └── frontend/            # Dashboard 前端源码（Vite + React + TS + pnpm，改前端才需要）
+├── examples/                # 使用示例
+├── tests/                   # 测试用例
+├── pyproject.toml           # 项目配置与依赖
 └── README.md
 ```

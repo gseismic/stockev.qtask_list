@@ -6,7 +6,7 @@ payload 超过阈值时自动上传 HTTP 存储服务，Redis 队列只存引用
 
 ```bash
 # 终端 1：启动外存服务端
-python -m remote_storage.server --port 8096
+python -m qtask_list.remote_storage.server --port 8096
 
 # 终端 2：启动消费者
 python examples/08_large_payload/consumer.py

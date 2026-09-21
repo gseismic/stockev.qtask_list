@@ -11,7 +11,7 @@
 - TTL 自动清理（默认 7 天），后台线程定期执行
 
 启动：
-  python -m remote_storage.server --port 8096
+  python -m qtask_list.remote_storage.server --port 8096
   uvicorn remote_storage.server:app --port 8096
 """
 

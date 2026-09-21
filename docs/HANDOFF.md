@@ -17,8 +17,9 @@ V2（版本 `0.2.0`）将业务 payload 与运行元数据分离：`TaskSpec` �
 attempt、deadline、outcome、location、replay 血缘和 live identity。V1 信封、旧 retry
 List、`expires_at`/`_retry` 仍可双读或安全降级。
 
-管理侧由三部分复用同一套 `QueueAdmin` 语义：Typer CLI（`cli/__main__.py`）、
-FastAPI Dashboard（`dashboard/`，Jinja + 原生 JS 单页）、Python SDK。
+管理侧由三部分复用同一套 `QueueAdmin` 语义：Typer CLI（`qtask_list/cli/__main__.py`）、
+FastAPI Dashboard（`qtask_list/dashboard/`，React SPA，见 PLAN-017）、Python SDK。
+（PLAN-019 起仓库为单包结构，cli/dashboard/remote_storage/frontend 均在 `qtask_list/` 内，前端用 pnpm。）
 
 ## 2. 当前已完成
 
@@ -79,10 +80,10 @@ FastAPI Dashboard（`dashboard/`，Jinja + 原生 JS 单页）、Python SDK。
 ```bash
 python -m pytest tests/ -q
 python -m ruff check .
-python -m mypy qtask_list cli dashboard remote_storage
+python -m mypy qtask_list
 python -m compileall -q examples
-# 前端（PLAN-017 起）：源码 frontend/，构建产物提交在 dashboard/static/spa/
-cd frontend && npm run build
+# 前端（PLAN-017 起）：源码 qtask_list/frontend/，构建产物提交在 qtask_list/dashboard/static/spa/（PLAN-019 起用 pnpm）
+cd qtask_list/frontend && pnpm install && pnpm build
 ```
 
 Redis 默认连接 `redis://localhost:6379/0`。

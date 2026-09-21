@@ -31,7 +31,7 @@ def main() -> None:
     )
     print(f"投递结果: {result.as_dict()}")
     print("队列引用中只存外存 key（kind=external），Redis 内不含数据本体。")
-    print(f"查看: python -m cli peek {NAMESPACE}:{QUEUE_NAME} --state ready --json")
+    print(f"查看: python -m qtask_list.cli peek {NAMESPACE}:{QUEUE_NAME} --state ready --json")
 
 
 if __name__ == "__main__":

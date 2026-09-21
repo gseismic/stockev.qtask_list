@@ -5,7 +5,7 @@ import pytest
 import redis
 from typer.testing import CliRunner
 
-from cli.__main__ import app
+from qtask_list.cli.__main__ import app
 
 
 @pytest.fixture
@@ -287,7 +287,7 @@ class TestCLIWatch:
         def stop_after_first_sleep(_seconds):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr("cli.__main__.time.sleep", stop_after_first_sleep)
+        monkeypatch.setattr("qtask_list.cli.__main__.time.sleep", stop_after_first_sleep)
         result = runner.invoke(
             app,
             ["watch", "stockev_list:watch_test", "-i", "1"],
@@ -300,9 +300,9 @@ class TestCLIWatch:
 
 class TestCLIWorker:
     def test_worker_missing_qtask_list(self, runner, r, monkeypatch):
-        import cli.__main__
+        import qtask_list.cli.__main__ as cli_module
 
-        monkeypatch.setattr(cli.__main__, "QTASK_LIST_AVAILABLE", False)
+        monkeypatch.setattr(cli_module, "QTASK_LIST_AVAILABLE", False)
 
         result = runner.invoke(app, ["worker", "-q", "test", "-n", "testns"])
         assert result.exit_code != 0
@@ -359,7 +359,7 @@ class TestCLICleanHistory:
 class TestCLIStorage:
     def test_storage_passes_runtime_config(self, runner, tmp_path, monkeypatch):
         import uvicorn
-        from remote_storage import server as storage_server
+        from qtask_list.remote_storage import server as storage_server
 
         calls = {}
         monkeypatch.setattr(storage_server, "DATA_DIR", tmp_path / "before")

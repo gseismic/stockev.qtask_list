@@ -35,8 +35,8 @@ storage = [
 ]
 
 [project.scripts]
-qtask = "cli.__main__:app"
-qtask_list = "cli.__main__:app"
+qtask = "qtask_list.cli.__main__:app"
+qtask_list = "qtask_list.cli.__main__:app"
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -44,10 +44,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qtask_list*", "cli*", "dashboard*", "remote_storage*"]
+include = ["qtask_list*"]
+exclude = ["qtask_list.frontend*"]
 
 [tool.setuptools.package-data]
-dashboard = ["templates/*.html", "static/css/*.css", "static/spa/*", "static/spa/assets/*"]
+"qtask_list.dashboard" = ["templates/*.html", "static/css/*.css", "static/spa/*", "static/spa/assets/*"]
 
 [tool.ruff]
 line-length = 100

@@ -11,7 +11,7 @@ qtask_list 是基于 Redis List 的分布式任务队列，核心机制为 `BRPO
 
 关键特性：可靠消费、V2 退避重试、DLQ 死信队列、延迟任务、Crash Recovery、多级流水线、大 payload 外存、信号量背压、历史归档。新代码优先使用 `TaskSpec`/`enqueue()`；`push()` 是兼容接口。
 
-项目源码位于 `qtask_list/`，CLI 位于 `cli/`，Dashboard 位于 `dashboard/`，示例在 `examples/`。
+项目为单包结构：核心库与附属模块（CLI/Dashboard/外存服务/前端源码）都在 `qtask_list/` 包内，示例在 `examples/`。
 
 ## 安装
 
@@ -232,7 +232,7 @@ archiver.archive_to_sqlite("stockev:fetch", days_ago=1)  # 归档 1 天前数据
 
 ## CLI 命令
 
-安装后可通过 `qtask` 或 `qtask_list` 调用。源码在 `cli/__main__.py`。
+安装后可通过 `qtask` 或 `qtask_list` 调用。源码在 `qtask_list/cli/__main__.py`。
 
 ```bash
 # 设置 Redis 连接
@@ -300,7 +300,7 @@ qtask dashboard
 
 ## Dashboard
 
-基于 FastAPI + React，`dashboard/main.py`。
+基于 FastAPI + React，`qtask_list/dashboard/main.py`。
 
 ```python
 # Python API
@@ -413,14 +413,12 @@ qtask_list/
 │   ├── storage.py        # RemoteStorage
 │   ├── archiver.py       # ArchiveManager + Monitor
 │   └── admin.py          # QueueAdmin + QueueState
-├── cli/
-│   └── __main__.py       # Typer CLI
-├── dashboard/
-│   ├── main.py           # FastAPI
-│   ├── templates/        # Jinja2
-│   └── static/           # CSS/JS
-├── remote_storage/       # RemoteStorage 服务端
-│   └── server.py
+│   ├── cli/              # Typer CLI（qtask / qtask_list）
+│   │   └── __main__.py
+│   ├── dashboard/        # FastAPI（main.py）+ templates + static（含 SPA 构建产物）
+│   ├── remote_storage/   # RemoteStorage 服务端
+│   │   └── server.py
+│   └── frontend/         # Dashboard 前端源码（Vite + React + pnpm）
 ├── examples/
 │   ├── generator.py
 │   ├── stockev/          # fetch_worker.py, store_worker.py
@@ -475,7 +473,7 @@ pipe.execute()
 ## 常见陷阱
 
 1. **Worker 启动顺序**：多级流水线必须先启动下游 Worker，否则中间队列堆积
-2. **CLI 命令名**：安装后为 `qtask` 或 `qtask_list`，源码调试用 `python -m cli`
+2. **CLI 命令名**：安装后为 `qtask` 或 `qtask_list`，源码调试用 `python -m qtask_list.cli`
 3. **`recover()` 默认安全**：只恢复失联 Worker 的 processing，不会抢活跃 Worker 的任务。强制恢复需 `include_active=True`
 4. **`clear` 不含 history**：默认清队列不删历史，删历史需显式 `--include-history`
 5. **V2 重试在 delay ZSET**：`retry_wait` 由 `delay_reason=retry` 派生；`retry` List 只代表待迁移的旧消息，使用 `move_retry()` 兼容。

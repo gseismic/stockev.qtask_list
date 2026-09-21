@@ -29,7 +29,7 @@ def main() -> None:
         )
     )
     print(f"投递结果: {result.as_dict()}")
-    print("查看队列状态: python -m cli status demo:hello")
+    print("查看队列状态: python -m qtask_list.cli status demo:hello")
 
 
 if __name__ == "__main__":

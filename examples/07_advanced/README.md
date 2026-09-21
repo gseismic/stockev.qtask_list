@@ -25,7 +25,7 @@ python examples/07_advanced/scheduler.py --session pm
 python examples/07_advanced/news_discover.py
 
 # 终端 2：投递一轮发现任务
-python -m cli push stockev_list:news-discover \
+python -m qtask_list.cli push stockev_list:news-discover \
   '{"action":"discover_news","urls":["https://example.com/a","https://example.com/b"]}'
 ```
 

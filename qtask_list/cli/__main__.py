@@ -665,7 +665,7 @@ def dashboard(
         threading.Thread(target=open_browser_delayed, daemon=True).start()
 
     import uvicorn
-    from dashboard.main import app
+    from qtask_list.dashboard.main import app
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 
@@ -800,7 +800,7 @@ def storage(
 ):
     """启动 RemoteStorage 服务（大 payload 外存）"""
     try:
-        from remote_storage import server as storage_server
+        from qtask_list.remote_storage import server as storage_server
     except ImportError as exc:
         console.print("[red]RemoteStorage 依赖未安装，请执行: pip install qtask_list[storage][/red]")
         raise typer.Exit(1) from exc

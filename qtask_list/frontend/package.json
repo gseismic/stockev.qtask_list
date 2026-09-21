@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "packageManager": "pnpm@10.5.2",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -19,5 +20,10 @@
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

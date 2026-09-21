@@ -12,7 +12,7 @@
   过期任务则出现在 deadline_missed（expired 视图）。
 
 注意：本脚本假设 demo:timing-demo 队列为空；若上次运行中断，先清理：
-    python -m cli clear demo:timing-demo --include-history --force
+    python -m qtask_list.cli clear demo:timing-demo --include-history --force
 """
 
 from pathlib import Path

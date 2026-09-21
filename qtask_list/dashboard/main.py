@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from dashboard.auth import (
+from qtask_list.dashboard.auth import (
     COOKIE_NAME,
     auth_config_error,
     create_session_token,

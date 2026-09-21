@@ -6,7 +6,7 @@ import pytest
 import redis
 from fastapi.testclient import TestClient
 
-from dashboard.main import app
+from qtask_list.dashboard.main import app
 
 
 @pytest.fixture(autouse=True)

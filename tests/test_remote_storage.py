@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from remote_storage import server as storage_server
+from qtask_list.remote_storage import server as storage_server
 
 
 def test_remote_storage_upload_download_delete(tmp_path, monkeypatch):

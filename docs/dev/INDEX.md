@@ -43,3 +43,9 @@
 - 计划文件：`PLAN-018-dashboard-spa-auth.md`
 - 结果文件：`PLAN-018-dashboard-spa-auth-OUTCOME.md`
 - 摘要：核查确认登录系统（PLAN-004）已满足"默认免登录、设 QTASK_DASHBOARD_PASSWORD 强制登录"；补齐 PLAN-017 引入的 SPA 路由回退鉴权缺口（spa_fallback 未登录 307 跳 /login），新增测试与 README 说明。pytest 119 passed，ruff/mypy 通过。
+
+## 2026-09-21 23:40
+
+- 计划文件：`PLAN-019-root-consolidation-pnpm.md`
+- 结果文件：`PLAN-019-root-consolidation-pnpm-OUTCOME.md`
+- 摘要：仓库收敛为单包结构（cli/dashboard/remote_storage/frontend 并入 qtask_list/，根目录 15 项→9 项）；删除冗余 requirements.txt；前端切换 pnpm（pnpm-lock.yaml 入库、packageManager 字段、esbuild 构建白名单）；同步 import/入口点/打包配置/示例模块路径/README/skills/HANDOFF。pytest 119 passed，ruff/mypy/pnpm build/uvicorn 登录冒烟通过。
