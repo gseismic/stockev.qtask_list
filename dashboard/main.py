@@ -474,10 +474,14 @@ def index(request: Request):
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
-def spa_fallback(full_path: str):
+def spa_fallback(full_path: str, request: Request):
     """SPA 客户端路由回退：非 API 路径返回静态文件或 index.html。"""
     if full_path.startswith(("api/", "static/", "assets/")):
         raise HTTPException(status_code=404, detail="Not Found")
+    # 认证开启时，SPA 壳页面与静态文件同样要求登录，避免未登录直接查看界面
+    settings = get_auth_settings()
+    if settings.enabled and not is_request_authenticated(request):
+        return RedirectResponse("/login")
     candidate = os.path.realpath(os.path.join(SPA_DIR, full_path))
     if candidate.startswith(os.path.realpath(SPA_DIR) + os.sep) and os.path.isfile(candidate):
         return FileResponse(candidate)

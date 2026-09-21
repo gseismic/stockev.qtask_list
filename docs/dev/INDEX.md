@@ -37,3 +37,9 @@
 - 计划文件：`PLAN-017-dashboard-react.md`
 - 结果文件：`PLAN-017-dashboard-react-OUTCOME.md`
 - 摘要：按 `docs/ui-design/v1/` 设计稿实施 React 版管理后台（frontend/，Vite+React+TS，构建产物入库 dashboard/static/spa/）：总览进度矩阵、队列列表/详情、全局任务视图+详情抽屉、Worker 监控、告警中心（前端规则引擎+localStorage）、教程页、双主题；后端增量 SPA 托管与 clean-history 接口，退役旧 Jinja+原生 JS 单页。pytest 118 passed，ruff/mypy/build 通过，浏览器端到端验证后测试数据已清理。
+
+## 2026-09-21 22:30
+
+- 计划文件：`PLAN-018-dashboard-spa-auth.md`
+- 结果文件：`PLAN-018-dashboard-spa-auth-OUTCOME.md`
+- 摘要：核查确认登录系统（PLAN-004）已满足"默认免登录、设 QTASK_DASHBOARD_PASSWORD 强制登录"；补齐 PLAN-017 引入的 SPA 路由回退鉴权缺口（spa_fallback 未登录 307 跳 /login），新增测试与 README 说明。pytest 119 passed，ruff/mypy 通过。

@@ -566,7 +566,7 @@ export QTASK_DASHBOARD_SECRET='<random-secret>'
 qtask dashboard --host 0.0.0.0 --no-open
 ```
 
-设置 `QTASK_DASHBOARD_PASSWORD` 后，访问 `/` 会先跳转到 `/login`，所有 `/api/*` 管理接口也会校验登录会话。公网部署建议放在 HTTPS 反向代理后，并设置 `QTASK_DASHBOARD_SECURE_COOKIE=1` 或 CLI 参数 `--secure-cookie`。
+设置 `QTASK_DASHBOARD_PASSWORD` 后，访问 `/` 会先跳转到 `/login`，所有 `/api/*` 管理接口以及 SPA 客户端路由（如 `/queues`）也会校验登录会话。不设置密码时认证默认关闭，服务可直接访问。公网部署建议放在 HTTPS 反向代理后，并设置 `QTASK_DASHBOARD_SECURE_COOKIE=1` 或 CLI 参数 `--secure-cookie`。
 
 也可以不用 CLI，直接用 uvicorn 部署（适合 systemd/容器）：
 

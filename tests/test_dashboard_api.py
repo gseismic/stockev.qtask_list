@@ -328,6 +328,23 @@ def test_dashboard_auth_requires_login(monkeypatch):
     assert queues.status_code == 401
 
 
+def test_dashboard_auth_guards_spa_fallback(monkeypatch):
+    """认证开启时，SPA 客户端路由与静态资源回退也必须登录后才能访问。"""
+    monkeypatch.setenv("QTASK_DASHBOARD_USER", "ops")
+    monkeypatch.setenv("QTASK_DASHBOARD_PASSWORD", "secret")
+    monkeypatch.setenv("QTASK_DASHBOARD_SECRET", "test-secret")
+    client = TestClient(app)
+
+    spa_route = client.get("/queues", follow_redirects=False)
+    assert spa_route.status_code in {302, 307}
+    assert spa_route.headers["location"] == "/login"
+
+    logged_in = client.post("/api/login", json={"username": "ops", "password": "secret"})
+    assert logged_in.status_code == 200
+    spa_route = client.get("/queues", follow_redirects=False)
+    assert spa_route.status_code == 200
+
+
 def test_dashboard_queue_stats_includes_completed_failed(client, r):
     queue = "qtask_dash_test:perf-sina:fetch"
     r.lpush(queue, make_msg("perf-1", {"action": "scrape_perf"}))
