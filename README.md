@@ -531,17 +531,20 @@ qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
 qtask dashboard
 ```
 
-Dashboard 是基于 React 的模块化控制台，启动后打开 `http://localhost:8765`。页面支持：
+Dashboard 是 React 单页应用（构建产物已随包发布，无需 Node 环境），启动后打开 `http://localhost:8765`。信息架构面向"盯盘 → 排查 → 处理"的运维动线：
 
-- 按队列查看 ready/processing/retry/retry_wait/dlq/delay/completed/failed/skipped/cancelled/deadline_missed/history。
-- 搜索 task_id、action、payload。
-- 按创建时间和完成时间筛选任务。
-- 查看任务详情和原始 JSON。
-- 单任务重试、删除。
-- 批量 drain 旧 retry List、重放 DLQ、按新截止时间 replay 错过截止的任务。
-- 安全恢复 stale processing；强制恢复 active processing 需要显式确认。
-- 投递测试任务，支持 delay 和 expire_seconds。
-- 删除队列及关联历史记录。
+| 页面 | 路由 | 用途 |
+|------|------|------|
+| 总览 | `/` | 全局 KPI（活跃队列/总剩余/合计速率/异常队列）+ 按 namespace 分组的队列进度矩阵（剩余/完成·1h/速率/ETA/停滞判定）+ 最新告警摘要 |
+| 队列 | `/queues` | 队列卡片、筛选与搜索；进入详情做操作 |
+| 队列详情 | `/queues/:name` | 完整状态 Tabs（ready/processing/retry/retry_wait/delay/dlq/completed/failed/skipped/cancelled/deadline_missed/history）、任务搜索与时间筛选、诊断、投递测试任务、队列级操作（drain retry/重放 DLQ/恢复 stale/清理历史/清空/删除） |
+| 任务 | `/tasks` | 跨队列搜索 task_id/action/payload，URL 可分享；task_id 精确命中直接打开详情抽屉 |
+| 任务详情抽屉 | 表格内点击 | 任务时间线、payload/result 懒加载（支持外存/压缩还原）、血缘（replay_of/replayed_by）、按状态显隐的重放/重入队/删除 |
+| Worker | `/workers` | 心跳与失联标记、失联任务一键恢复、Redis 内存水位 |
+| 告警 | `/alerts` | DLQ 堆积、失败率偏高、stale worker、ready 积压、任务过期、Worker 失联、Redis 内存超限的聚合列表；可定位跳转、标记已处理 |
+| 教程 | `/guide` | 说人话的概念手册（状态流转、关键数字、去重、操作速查表） |
+
+其他能力：白天/黑夜双主题（记忆在浏览器）、自动刷新（5s/15s/30s/关，出错自动降频 30s）、危险操作（清空/删除）需输入队列名二次确认、未登录自动跳转 `/login`。
 
 远程查看时应启用登录，并显式监听远程地址：
 
@@ -564,6 +567,28 @@ qtask dashboard --host 0.0.0.0 --no-open
 ```
 
 设置 `QTASK_DASHBOARD_PASSWORD` 后，访问 `/` 会先跳转到 `/login`，所有 `/api/*` 管理接口也会校验登录会话。公网部署建议放在 HTTPS 反向代理后，并设置 `QTASK_DASHBOARD_SECURE_COOKIE=1` 或 CLI 参数 `--secure-cookie`。
+
+也可以不用 CLI，直接用 uvicorn 部署（适合 systemd/容器）：
+
+```bash
+pip install "qtask_list[dashboard]"
+
+export QTASK_DASHBOARD_USER=admin
+export QTASK_DASHBOARD_PASSWORD='<strong-password>'
+export QTASK_DASHBOARD_SECRET='<random-secret>'
+uvicorn dashboard.main:app --host 0.0.0.0 --port 8765
+```
+
+### 修改前端（仅开发 Dashboard 时需要）
+
+前端源码在 `frontend/`（Vite + React + TypeScript），构建产物提交在 `dashboard/static/spa/`，因此使用与部署都不依赖 Node。只有改前端时才需要：
+
+```bash
+cd frontend
+npm install
+npm run dev      # 开发模式，代理 /api 到本机 8765 的后端
+npm run build    # 构建并输出到 dashboard/static/spa/，随包提交
+```
 
 ## 配置参数
 
@@ -609,8 +634,11 @@ qtask_list/
 ├── cli/
 │   └── __main__.py       # Typer CLI (qtask / qtask_list 命令)
 ├── dashboard/
-│   ├── main.py           # FastAPI Web Dashboard
-│   └── templates/        # Jinja2 模板
+│   ├── main.py           # FastAPI 后端（API + SPA 托管）
+│   ├── templates/        # 登录页模板
+│   ├── static/css/       # 登录页样式
+│   └── static/spa/       # React Dashboard 构建产物（frontend/ 构建输出）
+├── frontend/             # Dashboard 前端源码（Vite + React + TS，改前端才需要）
 ├── examples/             # 使用示例
 ├── tests/                # 测试用例
 ├── pyproject.toml        # 项目配置与依赖
