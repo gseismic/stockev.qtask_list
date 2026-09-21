@@ -78,6 +78,9 @@ a{color:var(--c-primary);text-decoration:none;cursor:pointer}
 .kpi{padding:var(--sp-4)}
 .kpi .v{font-size:var(--fs-xl);font-weight:600;margin-top:4px}
 .kpi .lbl{color:var(--text-secondary);font-size:var(--fs-xs)}
+.kpi.clickable{cursor:pointer;transition:border-color .15s,background .15s}
+.kpi.clickable:hover{border-color:var(--c-primary)}
+.kpi .hint{font-size:var(--fs-xs);color:var(--text-faint);margin-top:2px}
 
 /* table */
 table{width:100%;border-collapse:collapse}
@@ -124,6 +127,17 @@ pre.json{background:var(--bg-base);border:1px solid var(--border-default);border
 .modal h3{margin-bottom:var(--sp-3);font-size:var(--fs-lg)}
 .modal p{color:var(--text-secondary);margin-bottom:var(--sp-3);font-size:var(--fs-sm)}
 .modal .acts{display:flex;justify-content:flex-end;gap:var(--sp-2);margin-top:var(--sp-4)}
+
+/* guide */
+.guide{max-width:860px}
+.guide h2{font-size:var(--fs-lg);margin:"0 0 12px";margin-top:var(--sp-6);padding-top:var(--sp-2)}
+.guide h2 .anchor{color:var(--text-faint);font-size:var(--fs-xs);font-weight:400;margin-left:8px}
+.guide p{color:var(--text-secondary);margin:8px 0;line-height:1.8}
+.guide b,.guide strong{color:var(--text-primary)}
+.guide .example{background:var(--bg-base);border:1px solid var(--border-default);border-left:3px solid var(--c-primary);border-radius:var(--r-sm);padding:10px 14px;margin:10px 0;font-size:var(--fs-sm);color:var(--text-primary)}
+.guide .flow{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:12px 0}
+.guide .arrow{color:var(--text-faint)}
+.toc{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:var(--sp-4)}
 
 /* state switcher (demo) */
 .demo-bar{position:fixed;bottom:16px;left:230px;z-index:20;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-lg);padding:var(--sp-2) var(--sp-3);box-shadow:var(--shadow-2);font-size:var(--fs-xs)}
@@ -206,7 +220,7 @@ const AppCtx=React.createContext(null);
 // ---------- AppShell ----------
 function SideNav(){
   const {page,setPage,alerts}=React.useContext(AppCtx);
-  const items=[["overview","◈ 总览"],["queues","▤ 队列"],["tasks","☰ 任务"],["workers","◉ Worker"],["alerts","◆ 告警"]];
+  const items=[["overview","◈ 总览"],["queues","▤ 队列"],["tasks","☰ 任务"],["workers","◉ Worker"],["alerts","◆ 告警"],["guide","✎ 教程"]];
   return <nav className="sidenav">
     <div className="logo">qtask_list<small>管理后台 · 设计稿 V1</small></div>
     {items.map(([k,label])=>
@@ -247,11 +261,18 @@ function ProgressBar({q,w=120}){
 
 // ---------- 总览（进度总览） ----------
 function OverviewPage(){
-  const {queues,alerts,mode}=React.useContext(AppCtx);
+  const {queues,alerts,mode,setPage,setQueueListFilter}=React.useContext(AppCtx);
+  const [matrixView,setMatrixView]=useState("all");
   const active=queues.filter(q=>remaining(q)>0).length;
   const totalRem=queues.reduce((a,q)=>a+remaining(q),0);
   const totalRate=queues.reduce((a,q)=>a+q.rate,0);
   const abnormal=queues.filter(isAbnormal).length;
+  const goQueuesActive=()=>{setQueueListFilter("active");setPage("queues");};
+  const goMatrixAbnormal=()=>{
+    setMatrixView("abnormal");
+    const el=document.getElementById("matrix-anchor");
+    el&&el.scrollIntoView({behavior:"smooth",block:"start"});
+  };
   return <div>
     <TopBar title="总览"><span className="faint" style={{fontSize:"var(--fs-xs)"}}>自动刷新 5s · 上次 10:02:31</span></TopBar>
     {mode==="error"&&<div className="banner">⚠ Redis 连接失败: Connection refused — <a>重试</a></div>}
@@ -259,10 +280,10 @@ function OverviewPage(){
       {mode==="loading"
         ? [0,1,2,3].map(i=><div key={i} className="card kpi"><Skeleton h={28} w={60}/><div style={{marginTop:8}}><Skeleton h={10} w={80}/></div></div>)
         : <>
-        <div className="card kpi"><div className="lbl">活跃队列</div><div className="v num">{active}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}>/{queues.length}</span></div></div>
-        <div className="card kpi"><div className="lbl">总剩余（待执行）</div><div className="v num">{totalRem.toLocaleString()}</div></div>
-        <div className="card kpi"><div className="lbl">合计完成速率</div><div className="v num">{totalRate.toFixed(0)}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}> 条/min</span></div></div>
-        <div className="card kpi" style={abnormal?{borderColor:"var(--danger-border)"}:null}><div className="lbl">异常队列</div><div className="v num" style={abnormal?{color:"var(--c-danger)"}:null}>{abnormal}</div></div>
+        <div className="card kpi clickable" title="查看进行中的队列" onClick={goQueuesActive}><div className="lbl">活跃队列</div><div className="v num">{active}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}>/{queues.length}</span></div><div className="hint">点击查看队列列表 →</div></div>
+        <div className="card kpi clickable" title="按剩余量查看进行中的队列" onClick={goQueuesActive}><div className="lbl">总剩余（待执行）</div><div className="v num">{totalRem.toLocaleString()}</div><div className="hint">点击查看队列列表 →</div></div>
+        <div className="card kpi" title="口径：前端对完成数周期采样的差值估算，冷启动约 10s 后显示"><div className="lbl">合计完成速率</div><div className="v num">{totalRate.toFixed(0)}<span style={{fontSize:"var(--fs-md)",color:"var(--text-faint)"}}> 条/min</span></div><div className="hint">采样估算 · 无下钻</div></div>
+        <div className="card kpi clickable" style={abnormal?{borderColor:"var(--danger-border)"}:null} title="在进度矩阵中筛选仅异常" onClick={goMatrixAbnormal}><div className="lbl">异常队列</div><div className="v num" style={abnormal?{color:"var(--c-danger)"}:null}>{abnormal}</div><div className="hint">点击在矩阵中定位 →</div></div>
       </>}
     </div>
     <div className="card" style={{marginBottom:"var(--sp-5)"}}>
@@ -273,12 +294,11 @@ function OverviewPage(){
         <button className="btn sm">定位</button>
       </div>)}
     </div>
-    <QueueHealthMatrix/>
+    <div id="matrix-anchor"><QueueHealthMatrix view={matrixView} setView={setMatrixView}/></div>
   </div>;
 }
-function QueueHealthMatrix(){
+function QueueHealthMatrix({view,setView}){
   const {queues,mode,setPage}=React.useContext(AppCtx);
-  const [view,setView]=useState("all");
   const [collapsed,setCollapsed]=useState(()=>{const byNs={};queues.forEach(q=>byNs[q.ns]=(byNs[q.ns]||0)+remaining(q));const c={};Object.entries(byNs).forEach(([g,v])=>{if(v===0)c[g]=true});return c;});
   const withMeta=queues.map(q=>({...q,rem:remaining(q)}));
   const filtered=withMeta.filter(q=>view==="all"||(view==="active"?q.rem>0:isAbnormal(q)));
@@ -326,8 +346,7 @@ function QueueHealthMatrix(){
 
 // ---------- 队列列表 ----------
 function QueueListPage(){
-  const {queues,mode,confirm}=React.useContext(AppCtx);
-  const [filter,setFilter]=useState("all");
+  const {queues,mode,confirm,queueListFilter:filter,setQueueListFilter:setFilter}=React.useContext(AppCtx);
   const [ns,setNs]=useState("all");
   const [menu,setMenu]=useState(null);
   const nss=[...new Set(queues.map(q=>q.ns))];
@@ -549,6 +568,74 @@ function TaskDrawer(){
   </>;
 }
 
+// ---------- 教程 ----------
+function GuidePage(){
+  const toc=[
+    ["g-30s","30 秒总览"],["g-task-queue","任务和队列的关系"],["g-life","任务的一生（状态）"],
+    ["g-numbers","关键数字怎么读"],["g-dedup","去重：同一件事只干一次"],["g-worker","Worker 与心跳"],
+    ["g-ops","日常操作怎么做"],["g-pages","后台各页是干嘛的"]];
+  return <div className="guide">
+    <TopBar title="教程"><span className="faint" style={{fontSize:"var(--fs-xs)"}}>说人话的概念手册 · 给第一次用的人看</span></TopBar>
+    <div className="toc">{toc.map(([id,label])=><a key={id} className="btn sm" href={"#"+id}>{label}</a>)}</div>
+
+    <h2 id="g-30s">30 秒总览<a className="anchor" href="#g-30s">#</a></h2>
+    <p>你的程序把要干的活（<b>任务</b>）扔进<b>队列</b>；<b>Worker</b> 是干活的工人，从队列里领任务、执行、报结果。失败了会自动重试几次，重试还不行就扔进<b>死信队列（DLQ）</b>等管理员处理。这个后台就是让你<b>看得见</b>（进度/告警）和<b>管得了</b>（重放/恢复/清理）。</p>
+    <div className="example">你的程序 ──投递──▶ 队列(排队) ──领取──▶ Worker 执行 ──┬──▶ 完成 ✓<br/>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─失败─▶ 等一会重试 ──重试用尽─▶ 死信 DLQ ⚠</div>
+
+    <h2 id="g-task-queue">任务和队列的关系<a className="anchor" href="#g-task-queue">#</a></h2>
+    <p><b>队列</b>是一条流水线的名字，代表一类活，比如 <code>stockev:day-kline:fetch</code> 就是"抓日 K 线"这条流水线。名字里的 <code>stockev</code> 是 <b>namespace</b>，相当于项目/业务的分组前缀，方便把不同业务的队列分开管理。</p>
+    <p><b>任务</b>是流水线里一条具体的活，比如"抓 AAPL 2026-09-19 这一天的日 K"。</p>
+    <div className="example">一个队列 = 一类活（可能有几十到几万条任务）<br/>一条任务 = 这类活里的一件具体的事<br/>后台里：总览/队列页看的是"流水线"，点进去的任务表格看的是"每件事"</div>
+    <p>所以你说的"几百个任务在跑"，在这个后台里通常对应几十上百个<b>队列</b>；每条队列自己的进度在总览的进度矩阵里看，单条任务的明细进队列详情搜。</p>
+
+    <h2 id="g-life">任务的一生（状态）<a className="anchor" href="#g-life">#</a></h2>
+    <p>一条任务从投递到结束，只会在下面几个状态之间流转：</p>
+    <div className="flow">
+      <Badge c="primary">ready 排队中</Badge><span className="arrow">→</span>
+      <Badge c="primary">processing 执行中</Badge><span className="arrow">→</span>
+      <Badge c="success">completed 完成</Badge>
+    </div>
+    <p>失败的话：</p>
+    <div className="flow">
+      <Badge c="primary">processing</Badge><span className="arrow">→</span>
+      <Badge c="warning">retry_wait 等着重试</Badge><span className="arrow">→</span>
+      <span className="faint">(30s → 1min → … 越等越久)</span><span className="arrow">→</span>
+      <Badge c="primary">processing</Badge><span className="arrow">→</span>…
+      <span className="arrow">重试用尽 →</span><Badge c="danger">dlq 死信</Badge>
+    </div>
+    <p>其他状态：<Badge c="warning">delay 定时</Badge> 投递时说好"晚点再干"；<Badge c="danger">deadline_missed/skipped 过期</Badge> 排队太久，错过了最晚开始时间，跳过不干；<Badge c="muted">cancelled 取消</Badge> 被管理操作取消。</p>
+    <div className="example">一句话：<b>ready/delay/retry_wait = 还没干；processing = 正在干；completed/failed/dlq/skipped = 干完了（不管好坏）。</b></div>
+
+    <h2 id="g-numbers">关键数字怎么读<a className="anchor" href="#g-numbers">#</a></h2>
+    <p><b>attempt</b>：这已经是第几次尝试。<code>max_retry=3</code> 的意思是<b>总共最多干 3 次</b>（不是失败后再试 3 次）。</p>
+    <p><b>剩余</b> = ready + processing + retry_wait + delay，即"还没干完的总数"。</p>
+    <p><b>速率</b>：后台每隔几秒数一次"完成了多少"，取差值估算出条/min——所以刚打开页面会有约 10 秒显示"—"。</p>
+    <p><b>ETA（预计完成）</b> = 剩余 ÷ 速率。速率掉到 0 但还有剩余 = <b>停滞</b>（红色），多半是 Worker 挂了或堵住了，去告警页看。</p>
+
+    <h2 id="g-dedup">去重：同一件事只干一次<a className="anchor" href="#g-dedup">#</a></h2>
+    <p>定时任务每 5 分钟投一轮，如果上一轮还没干完，下一轮再投岂不是重复？靠的是 <b>logical_key（身份键）</b>：同一条"身份"的任务在途时，再投会被挡掉。键里编了时间桶（如 <code>quote:AAPL:20260921T1000</code>），所以"上一分钟"和"这一分钟"天然是两件事，不会被误挡。</p>
+
+    <h2 id="g-worker">Worker 与心跳<a className="anchor" href="#g-worker">#</a></h2>
+    <p>Worker 每隔几秒报一次平安（<b>心跳</b>）。如果超过一段时间没报（比如程序被 kill -9），它手里"执行中"的任务就成了没人管的孤儿——系统会把它标记为<b>失联</b>，这些任务可以被<b>恢复</b>（放回队列重新干）。所以崩溃不丢任务，但同一件事可能被干两次，落库代码要写成"重复干也没事"（幂等）。</p>
+
+    <h2 id="g-ops">日常操作怎么做<a className="anchor" href="#g-ops">#</a></h2>
+    <p>后台里的按钮和它们的适用时机：</p>
+    <table style={{margin:"8px 0"}}>
+      <thead><tr><th>场景</th><th>去哪</th><th>干什么</th></tr></thead>
+      <tbody>
+        <tr><td>DLQ 涨了（任务反复失败）</td><td>队列详情 → dlq 标签</td><td>先看失败原因（任务详情），修完点「重放」再给一次机会</td></tr>
+        <tr><td>Worker 失联</td><td>Worker 页</td><td>确认人真没了再点「恢复任务」，任务会放回队列</td></tr>
+        <tr><td>过期任务一堆</td><td>队列详情 deadline_missed</td><td>「重放并改截止时间」，把最晚开始时间推到未来</td></tr>
+        <tr><td>队列不要了</td><td>队列卡片「操作▾」</td><td>清空（危险，二次确认）；连历史一起删用「删除队列」</td></tr>
+        <tr><td>想试试通不通</td><td>队列页「+ 投递测试任务」</td><td>投一条测试任务看能不能正常走完</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="g-pages">后台各页是干嘛的<a className="anchor" href="#g-pages">#</a></h2>
+    <p><b>总览</b>=盯盘，看全部流水线进度和异常；<b>队列</b>=流水线管理入口（操作都在这）；<b>任务</b>=跨队列搜某条任务；<b>Worker</b>=工人状态；<b>告警</b>=出事自动提醒，可定位。</p>
+  </div>;
+}
+
 // ---------- 确认弹窗 ----------
 function ConfirmDialog(){
   const {dialog,closeDialog}=React.useContext(AppCtx);
@@ -568,6 +655,7 @@ function App(){
   const [dialog,setDialog]=useState(null);
   const [mode,setMode]=useState("default");
   const [theme,setTheme]=useState(()=>{try{return localStorage.getItem("qtask-theme")||"light"}catch(e){return "light"}});
+  const [queueListFilter,setQueueListFilter]=useState("all");
   useEffect(()=>{
     document.documentElement.dataset.theme=theme;
     try{localStorage.setItem("qtask-theme",theme)}catch(e){}
@@ -575,6 +663,7 @@ function App(){
   const ctx={page,setPage,queues:DEMO.queues,workers:DEMO.workers,alerts:DEMO.alerts,tasks:DEMO.tasks,mode,
     theme,setTheme,
     drawer,dialog,openDrawer:setDrawer,closeDrawer:()=>setDrawer(null),
+    queueListFilter,setQueueListFilter,
     confirm:(title,body)=>setDialog({title,body}),closeDialog:()=>setDialog(null)};
   return <AppCtx.Provider value={ctx}>
     <div className="shell">
@@ -586,6 +675,7 @@ function App(){
         {page==="workers"&&<WorkersPage/>}
         {page==="alerts"&&<AlertsPage/>}
         {page==="detail"&&<QueueDetailPage/>}
+        {page==="guide"&&<GuidePage/>}
         {page!=="detail"&&page!=="overview"&&page!=="queues"&&<div/>}
       </main>
     </div>
