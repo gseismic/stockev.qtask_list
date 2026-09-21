@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>qtask_list 管理后台 · UI 设计稿 V1</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+/* ============ tokens ============ */
+:root{
+  --bg-base:#0d1117; --bg-surface:#161b22; --bg-surface-2:#1c2129;
+  --border-default:#30363d;
+  --text-primary:#e6edf3; --text-secondary:#9198a1; --text-faint:#6e7681;
+  --c-primary:#2f81f7; --c-success:#3fb950; --c-warning:#d29922; --c-danger:#f85149; --c-muted:#8b949e;
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:18px; --fs-xl:24px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
+  --r-sm:4px; --r-md:6px; --r-lg:8px;
+  --shadow-1:0 1px 3px rgba(0,0,0,.4); --shadow-2:0 8px 24px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-base);color:var(--text-primary);font:var(--fs-sm)/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,select{font:inherit;color:var(--text-primary);background:var(--bg-base);border:1px solid var(--border-default);border-radius:var(--r-sm);padding:6px 10px;outline:none}
+input:focus,select:focus{border-color:var(--c-primary)}
+.num{font-variant-numeric:tabular-nums}
+a{color:var(--c-primary);text-decoration:none;cursor:pointer}
+
+/* ============ primitives ============ */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:var(--r-sm);font-size:var(--fs-xs);font-weight:500}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:var(--r-md);border:1px solid var(--border-default);background:var(--bg-surface-2);font-size:var(--fs-md)}
+.btn:hover{border-color:var(--text-faint)}
+.btn.primary{background:var(--c-primary);border-color:var(--c-primary);color:#fff}
+.btn.danger{color:var(--c-danger);border-color:rgba(248,81,73,.4)}
+.btn.danger:hover{background:rgba(248,81,73,.12)}
+.btn.sm{padding:2px 8px;font-size:var(--fs-xs)}
+.card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-md)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+@keyframes breathe{50%{opacity:.4}}
+.dot.pulse{animation:breathe 1.6s infinite}
+.skeleton{background:linear-gradient(90deg,var(--bg-surface-2) 25%,#242a33 50%,var(--bg-surface-2) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:var(--r-sm)}
+@keyframes sk{to{background-position:-200% 0}}
+
+/* ============ layout ============ */
+.shell{display:flex;min-height:100vh}
+.sidenav{width:200px;background:var(--bg-surface);border-right:1px solid var(--border-default);padding:var(--sp-4) 0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.sidenav .logo{padding:0 var(--sp-4) var(--sp-4);border-bottom:1px solid var(--border-default);font-weight:600;font-size:var(--fs-md)}
+.sidenav .logo small{display:block;color:var(--text-faint);font-weight:400;font-size:var(--fs-xs)}
+.navitem{display:flex;align-items:center;gap:10px;padding:8px var(--sp-4);color:var(--text-secondary);font-size:var(--fs-md);border-left:2px solid transparent;text-align:left;width:100%}
+.navitem:hover{color:var(--text-primary);background:rgba(255,255,255,.03)}
+.navitem.active{color:var(--text-primary);border-left-color:var(--c-primary);background:rgba(47,129,247,.08)}
+.navitem .count{margin-left:auto;background:var(--c-danger);color:#fff;font-size:var(--fs-xs);border-radius:10px;padding:0 6px;font-weight:600}
+.main{flex:1;padding:var(--sp-5) var(--sp-6);min-width:0}
+.topbar{display:flex;align-items:center;gap:var(--sp-4);margin-bottom:var(--sp-5)}
+.topbar h1{font-size:var(--fs-xl);font-weight:600;flex:1}
+.muted{color:var(--text-secondary)}.faint{color:var(--text-faint)}
+.row{display:flex;gap:var(--sp-4);align-items:center}
+
+/* KPI */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-4);margin-bottom:var(--sp-5)}
+.kpi{padding:var(--sp-4)}
+.kpi .v{font-size:var(--fs-xl);font-weight:600;margin-top:4px}
+.kpi .lbl{color:var(--text-secondary);font-size:var(--fs-xs)}
+
+/* table */
+table{width:100%;border-collapse:collapse}
+th{font-size:var(--fs-xs);color:var(--text-secondary);text-align:left;padding:8px 12px;background:var(--bg-surface-2);border-bottom:1px solid var(--border-default);font-weight:500;position:sticky;top:0}
+td{padding:9px 12px;border-bottom:1px solid var(--border-default);font-size:var(--fs-sm)}
+tbody tr:hover{background:rgba(255,255,255,.02);cursor:pointer}
+
+/* tabs */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border-default);margin-bottom:var(--sp-4);flex-wrap:wrap}
+.tab{padding:7px 12px;color:var(--text-secondary);font-size:var(--fs-sm);border-bottom:2px solid transparent}
+.tab:hover{color:var(--text-primary)}
+.tab.active{color:var(--text-primary);border-bottom-color:var(--c-primary)}
+.tab .n{color:var(--c-danger);font-weight:600}
+
+/* drawer */
+.drawer-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:40}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:560px;background:var(--bg-surface);border-left:1px solid var(--border-default);box-shadow:var(--shadow-2);z-index:41;display:flex;flex-direction:column}
+.drawer .hd{padding:var(--sp-4);border-bottom:1px solid var(--border-default)}
+.drawer .bd{flex:1;overflow:auto;padding:var(--sp-4)}
+.drawer .ft{padding:var(--sp-4);border-top:1px solid var(--border-default);display:flex;gap:var(--sp-2)}
+.sec{margin-bottom:var(--sp-4)}
+.sec h3{font-size:var(--fs-md);margin-bottom:var(--sp-2);color:var(--text-secondary);font-weight:600}
+pre.json{background:var(--bg-base);border:1px solid var(--border-default);border-radius:var(--r-sm);padding:var(--sp-3);font-size:var(--fs-xs);overflow:auto;max-height:220px;color:#a5d6ff}
+
+/* timeline */
+.tl{list-style:none}
+.tl li{position:relative;padding:0 0 var(--sp-3) 22px;border-left:1px solid var(--border-default);margin-left:5px;font-size:var(--fs-sm)}
+.tl li:last-child{border-left-color:transparent;padding-bottom:0}
+.tl .t{position:absolute;left:-5px;top:3px;width:9px;height:9px;border-radius:50%}
+.tl .time{color:var(--text-faint);font-size:var(--fs-xs);margin-right:8px}
+
+/* alerts */
+.alert-item{display:flex;gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);border-bottom:1px solid var(--border-default);align-items:flex-start}
+.alert-item .body{flex:1}
+.alert-item .title{font-size:var(--fs-md);font-weight:500}
+.alert-item .meta{font-size:var(--fs-xs);color:var(--text-faint);margin-top:2px}
+
+/* banner */
+.banner{display:flex;align-items:center;gap:var(--sp-3);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.4);color:var(--c-danger);border-radius:var(--r-md);padding:var(--sp-2) var(--sp-4);margin-bottom:var(--sp-4);font-size:var(--fs-sm)}
+
+/* modal */
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:center;justify-content:center}
+.modal{width:420px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-lg);box-shadow:var(--shadow-2);padding:var(--sp-5)}
+.modal h3{margin-bottom:var(--sp-3);font-size:var(--fs-lg)}
+.modal p{color:var(--text-secondary);margin-bottom:var(--sp-3);font-size:var(--fs-sm)}
+.modal .acts{display:flex;justify-content:flex-end;gap:var(--sp-2);margin-top:var(--sp-4)}
+
+/* state switcher (demo) */
+.demo-bar{position:fixed;bottom:16px;left:230px;z-index:20;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-lg);padding:var(--sp-2) var(--sp-3);box-shadow:var(--shadow-2);font-size:var(--fs-xs)}
+.demo-bar .lab{color:var(--text-faint);margin-right:6px}
+.demo-bar button{padding:2px 8px;border-radius:var(--r-sm);color:var(--text-secondary);margin-left:2px}
+.demo-bar button.on{background:var(--c-primary);color:#fff}
+.menu{position:absolute;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-md);box-shadow:var(--shadow-2);min-width:180px;z-index:30;padding:4px 0}
+.menu button{display:block;width:100%;text-align:left;padding:7px 14px;font-size:var(--fs-sm);color:var(--text-primary)}
+.menu button:hover{background:rgba(255,255,255,.04)}
+.menu button.dz{color:var(--c-danger)}
+.menu .sep{border-top:1px solid var(--border-default);margin:4px 0}
+.empty{padding:var(--sp-6);text-align:center;color:var(--text-secondary)}
+.empty .big{font-size:var(--fs-lg);margin-bottom:var(--sp-2);color:var(--text-primary)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="env,react">
+const {useState,useEffect,useMemo,useRef} = React;
+
+/* =====================================================================
+ * 组件树对应 docs/ui-design/v1/README.md §5
+ * 本原型使用 mock 数据演示默认态；右下角切换器演示空/加载/错误态。
+ * ===================================================================== */
+
+// ---------- 原子组件 ----------
+const Badge = ({c,children}) => {
+  const color={primary:"var(--c-primary)",success:"var(--c-success)",warning:"var(--c-warning)",danger:"var(--c-danger)",muted:"var(--c-muted)"}[c];
+  return <span className="badge" style={{color,border:`1px solid ${color}44`,background:`color-mix(in srgb,${color} 12%, transparent)`}}>{children}</span>;
+};
+const STATE_COLOR={ready:"primary",processing:"primary",retry:"warning",retry_wait:"warning",delay:"warning",completed:"success",failed:"danger",dlq:"danger",deadline_missed:"danger",expired:"danger",skipped:"muted",cancelled:"muted",history:"muted"};
+const StateBadge=({s})=><Badge c={STATE_COLOR[s]||"muted"}>{s}</Badge>;
+
+const Dot=({c,pulse})=><span className={"dot"+(pulse?" pulse":"")} style={{background:c}}/>;
+
+const Skeleton=({h=14,w="100%",style})=><div className="skeleton" style={{height:h,width:w,...style}}/>;
+
+// ---------- 全局状态（页面级 demo） ----------
+const DEMO={ // mock 数据，正式实现来自 /api/*
+  queues:[
+    {name:"stockev:day-kline:fetch",stats:{ready:120,processing:4,retry_wait:6,delay:0,dlq:0,completed:8421,failed:168},fail_rate:.02},
+    {name:"stockev:quote:5min",stats:{ready:8,processing:2,retry_wait:3,delay:12,dlq:1,completed:15230,failed:96},fail_rate:.01},
+    {name:"stockev:news:discover",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:312,failed:0},fail_rate:0},
+    {name:"stockev:news:fetch",stats:{ready:0,processing:0,retry_wait:0,delay:0,dlq:0,completed:1204,failed:2},fail_rate:0},
+    {name:"stockev:store",stats:{ready:2,processing:1,retry_wait:0,delay:0,dlq:0,completed:15022,failed:12},fail_rate:0},
+  ],
+  workers:[
+    {worker_id:"fetch-3",queue:"stockev:quote:5min",heartbeat:"2s 前",stale:false,processing:2},
+    {worker_id:"fetch-4",queue:"stockev:quote:5min",heartbeat:"3s 前",stale:false,processing:0},
+    {worker_id:"kline-1",queue:"stockev:day-kline:fetch",heartbeat:"8min 前",stale:true,processing:3},
+    {worker_id:"news-1",queue:"stockev:news:fetch",heartbeat:"5s 前",stale:false,processing:1},
+  ],
+  alerts:[
+    {sev:"danger",rule:"dlq",title:"stockev:quote:5min 的死信队列出现 1 条任务",time:"10:02"},
+    {sev:"danger",rule:"worker",title:"Worker kline-1 心跳超时（最后心跳 08:12）",time:"08:15"},
+    {sev:"warning",rule:"failed%",title:"stockev:day-kline:fetch 最近 50 条失败率 8%（阈值 5%）",time:"07:40"},
+  ],
+  tasks:[
+    {task_id:"8f3ac2e1",action:"fetch_quote",attempt:2,state:"retry_wait",created:"10:00:05",done:"—",payload:'{symbol:"AAPL",slot:"20260921T1000"}'},
+    {task_id:"91bd47fe",action:"fetch_quote",attempt:1,state:"completed",created:"09:55:00",done:"09:55:02",payload:'{symbol:"MSFT",slot:"20260921T0955"}'},
+    {task_id:"c02d9a11",action:"fetch_quote",attempt:1,state:"processing",created:"10:00:05",done:"—",payload:'{symbol:"NVDA",slot:"20260921T1000"}'},
+    {task_id:"77e0b345",action:"store_price",attempt:1,state:"completed",created:"09:55:02",done:"09:55:03",payload:'{symbol:"MSFT",price:431.2}'},
+    {task_id:"aa19f802",action:"fetch_quote",attempt:3,state:"dlq",created:"09:40:00",done:"—",payload:'{symbol:"TSLA",slot:"20260921T0940"}'},
+    {task_id:"bd63ce70",action:"fetch_quote",attempt:1,state:"deadline_missed",created:"09:35:00",done:"—",payload:'{symbol:"AMD",slot:"20260921T0935"}'},
+  ],
+  redis:{used:"1.2G",peak:"1.4G",threshold:"2G",pct:62},
+};
+
+const AppCtx=React.createContext(null);
+
+// ---------- AppShell ----------
+function SideNav(){
+  const {page,setPage,alerts}=React.useContext(AppCtx);
+  const items=[["overview","◈ 总览"],["queues","▤ 队列"],["tasks","☰ 任务"],["workers","◉ Worker"],["alerts","◆ 告警"]];
+  return <nav className="sidenav">
+    <div className="logo">qtask_list<small>管理后台 · 设计稿 V1</small></div>
+    {items.map(([k,label])=>
+      <button key={k} className={"navitem"+(page===k?" active":"")} onClick={()=>setPage(k)}>
+        {label}{k==="alerts"&&alerts.length>0&&<span className="count">{alerts.length}</span>}
+      </button>)}
+    <div style={{marginTop:"auto",padding:"12px 16px",fontSize:"var(--fs-xs)"}} className="faint">
+      <Dot c="var(--c-success)"/> 已连接 redis://…6379/0
+    </div>
+  </nav>;
+}
+function TopBar({title,children}){
+  return <div className="topbar"><h1>{title}</h1>{children}</div>;
+}
+
+// ---------- 总览 ----------
+function OverviewPage(){
+  const {queues,alerts,workers,mode}=React.useContext(AppCtx);
+  const dlqTotal=queues.reduce((a,q)=>a+q.stats.dlq,0);
+  const stale=workers.filter(w=>w.stale).length;
+  return <div>
+    <TopBar title="总览"><span className="faint" style={{fontSize:"var(--fs-xs)"}}>自动刷新 5s · 上次 10:02:31</span></TopBar>
+    {mode==="error"&&<div className="banner">⚠ Redis 连接失败: Connection refused — <a>重试</a></div>}
+    <div className="kpis">
+      {mode==="loading"
+        ? [0,1,2,3].map(i=><div key={i} className="card kpi"><Skeleton h={28} w={60}/><div style={{marginTop:8}}><Skeleton h={10} w={80}/></div></div>)
+        : <>
+        <div className="card kpi"><div className="lbl">队列</div><div className="v num">{queues.length}</div></div>
+        <div className="card kpi" style={dlqTotal?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">DLQ 总量</div><div className="v num" style={dlqTotal?{color:"var(--c-danger)"}:null}>{dlqTotal}</div></div>
+        <div className="card kpi" style={stale?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">失联 Worker</div><div className="v num" style={stale?{color:"var(--c-danger)"}:null}>{stale}</div></div>
+        <div className="card kpi"><div className="lbl">Redis 内存</div><div className="v num">{DEMO.redis.pct}%</div><div style={{fontSize:"var(--fs-xs)"}} className="faint">1.2G / 2G 阈值</div></div>
+      </>}
+    </div>
+    <div className="card" style={{marginBottom:"var(--sp-5)"}}>
+      <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border-default)",fontWeight:600,fontSize:"var(--fs-md)"}}>告警摘要 <a style={{marginLeft:12,fontSize:"var(--fs-xs)"}} onClick={()=>{}}>查看全部 →</a></div>
+      {alerts.map((a,i)=><div key={i} className="alert-item">
+        <Dot c={a.sev==="danger"?"var(--c-danger)":"var(--c-warning)"}/>
+        <div className="body"><div className="title">{a.title}</div><div className="meta num">{a.time}</div></div>
+        <button className="btn sm">定位</button>
+      </div>)}
+    </div>
+    <QueueHealthMatrix/>
+  </div>;
+}
+function QueueHealthMatrix(){
+  const {queues,mode,setPage}=React.useContext(AppCtx);
+  const sorted=[...queues].sort((a,b)=>(b.stats.dlq-a.stats.dlq)||(b.fail_rate-a.fail_rate));
+  return <div className="card">
+    <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border-default)",fontWeight:600,fontSize:"var(--fs-md)"}}>队列健康矩阵</div>
+    {mode==="loading"
+      ? <div style={{padding:16}}>{[0,1,2].map(i=><Skeleton key={i} h={20} style={{marginBottom:12}}/>)}</div>
+      : mode==="empty" ? <div className="empty"><div className="big">还没有队列</div>用 <code>qtask push</code> 或在队列页投递第一条任务，这里会出现队列健康概览。</div>
+      : <table><thead><tr><th>队列</th><th className="num">ready</th><th className="num">processing</th><th className="num">retry_wait</th><th className="num">dlq</th><th className="num">失败率</th><th>健康</th></tr></thead>
+      <tbody>{sorted.map(q=><tr key={q.name} onClick={()=>setPage("detail")}>
+        <td style={{fontWeight:500}}>{q.name}</td>
+        <td className="num">{q.stats.ready}</td><td className="num">{q.stats.processing}</td>
+        <td className="num">{q.stats.retry_wait||"-"}</td>
+        <td className="num" style={q.stats.dlq?{color:"var(--c-danger)",fontWeight:600}:null}>{q.stats.dlq}</td>
+        <td className="num">{(q.fail_rate*100).toFixed(1)}%</td>
+        <td>{q.stats.dlq>0?<Badge c="danger">DLQ ⚠</Badge>:q.fail_rate>.05?<Badge c="warning">失败率</Badge>:q.stats.ready+q.stats.processing>0?<Badge c="success">正常</Badge>:<Badge c="muted">空闲</Badge>}</td>
+      </tr>)}</tbody></table>}
+  </div>;
+}
+
+// ---------- 队列列表 ----------
+function QueueListPage(){
+  const {queues,mode,confirm}=React.useContext(AppCtx);
+  const [filter,setFilter]=useState("all");
+  const [menu,setMenu]=useState(null);
+  const list=queues.filter(q=>filter==="all"||(filter==="active"?q.stats.ready+q.stats.processing>0:q.stats.dlq>0||q.fail_rate>.05));
+  return <div>
+    <TopBar title="队列">
+      <button className="btn primary" onClick={()=>confirm("投递测试任务","向选定队列投递一条测试任务（可设置 delay 与 expire_seconds）。")}>+ 投递测试任务</button>
+    </TopBar>
+    <div className="row" style={{marginBottom:"var(--sp-4)"}}>
+      {["all","active","abnormal"].map(f=><button key={f} className="btn sm" style={filter===f?{borderColor:"var(--c-primary)",color:"var(--c-primary)"}:null} onClick={()=>setFilter(f)}>{({all:"全部",active:"有活动",abnormal:"仅异常"})[f]}</button>)}
+      <input placeholder="搜索队列名…" style={{width:220}}/>
+    </div>
+    {mode==="loading"?<div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16}}>{[0,1,2,3,4,5].map(i=><div key={i} className="card" style={{padding:16,height:120}}><Skeleton/><div style={{marginTop:12}}><Skeleton h={10}/></div></div>)}</div>
+    :mode==="empty"?<div className="card empty"><div className="big">没有队列</div>通过 SmartQueue.push 或下方按钮投递第一条任务，队列会自动出现。</div>
+    :<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:"var(--sp-4)"}}>
+      {list.map(q=><div key={q.name} className="card" style={{padding:"var(--sp-4)"}}>
+        <div className="row" style={{justifyContent:"space-between",marginBottom:8}}>
+          <span style={{fontWeight:600,fontSize:"var(--fs-md)"}}>{q.name}</span>
+          {q.stats.dlq>0?<Badge c="danger">DLQ ⚠</Badge>:q.fail_rate>.05?<Badge c="warning">失败率</Badge>:<Badge c="success">正常</Badge>}
+        </div>
+        <div className="row" style={{gap:16,fontSize:"var(--fs-xs)",color:"var(--text-secondary)",marginBottom:"var(--sp-3)"}}>
+          <span>ready <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.ready}</b></span>
+          <span>processing <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.processing}</b></span>
+          <span>retry_wait <b className="num" style={{color:"var(--text-primary)"}}>{q.stats.retry_wait}</b></span>
+          <span>dlq <b className="num" style={q.stats.dlq?{color:"var(--c-danger)"}:{color:"var(--text-primary)"}}>{q.stats.dlq}</b></span>
+        </div>
+        <div className="row" style={{position:"relative"}}>
+          <button className="btn sm primary" onClick={()=>{}}>详情</button>
+          <button className="btn sm" onClick={e=>setMenu(menu===q.name?null:q.name)}>操作 ▾</button>
+          {menu===q.name&&<div className="menu" style={{top:34,left:52}}>
+            <button>投递测试任务</button><button>迁移旧 retry List</button><button>重放全部 DLQ</button><button>恢复 stale processing</button>
+            <div className="sep"/><button className="dz" onClick={()=>confirm("清空队列",`将清空 ${q.name} 的所有子队列，进行中的任务会丢失。`)}>清空队列…</button>
+            <button className="dz" onClick={()=>confirm("删除队列",`将删除 ${q.name} 及其全部历史记录，不可恢复。输入队列名以确认。`)}>删除队列…</button>
+          </div>}
+        </div>
+      </div>)}
+    </div>}
+  </div>;
+}
+
+// ---------- 队列详情 ----------
+const STATES=["all","ready","processing","retry","retry_wait","delay","dlq","completed","failed","skipped","cancelled","deadline_missed","history"];
+function QueueDetailPage(){
+  const {tasks,mode,openDrawer,confirm}=React.useContext(AppCtx);
+  const [tab,setTab]=useState("dlq");
+  const [menu,setMenu]=useState(false);
+  const counts={dlq:1,failed:2,retry_wait:1};
+  const visible=tasks.filter(t=>tab==="all"||t.state===tab);
+  return <div>
+    <TopBar title="stockev:quote:5min">
+      <span className="row" style={{gap:8,fontSize:"var(--fs-xs)"}}>
+        <Badge c="primary">ready 8</Badge><Badge c="primary">processing 2</Badge><Badge c="warning">retry_wait 3</Badge><Badge c="danger">dlq 1</Badge>
+      </span>
+      <button className="btn primary" onClick={()=>confirm("投递测试任务","向本队列投递一条测试任务。")}>+ 投递测试任务</button>
+      <div style={{position:"relative"}}>
+        <button className="btn" onClick={()=>setMenu(!menu)}>操作 ▾</button>
+        {menu&&<div className="menu" style={{top:38,right:0}}>
+          <button>迁移旧 retry List</button><button>重放全部 DLQ</button><button>恢复 stale processing</button><button>清理历史（TTL 15 天）</button>
+          <div className="sep"/><button className="dz" onClick={()=>confirm("清空队列","将清空本队列所有子队列。")}>清空队列…</button><button className="dz" onClick={()=>confirm("删除队列","将删除本队列及全部历史，不可恢复。")}>删除队列…</button>
+        </div>}
+      </div>
+      <button className="btn" onClick={()=>confirm("诊断","对队列执行 diagnose：检查各子队列、stale worker 与历史一致性。")}>诊断</button>
+    </TopBar>
+    <div className="tabs">{STATES.map(s=>
+      <button key={s} className={"tab"+(tab===s?" active":"")} onClick={()=>setTab(s)}>{s}{counts[s]&&<span className="n"> ({counts[s]})</span>}</button>)}
+    </div>
+    <div className="row" style={{marginBottom:"var(--sp-3)"}}>
+      <input placeholder="搜索 task_id / action / payload…" style={{flex:1,maxWidth:320}}/>
+      <select><option>全部 action</option><option>fetch_quote</option><option>store_price</option></select>
+      <select><option>全部时间</option><option>最近 1 小时</option><option>今天</option><option>自定义…</option></select>
+      <span style={{flex:1}}/>
+      <label className="row" style={{gap:6,fontSize:"var(--fs-xs)"}}><input type="checkbox" defaultChecked/> 自动刷新</label>
+      <button className="btn sm">刷新</button>
+    </div>
+    <div className="card">
+      {mode==="loading"?<div style={{padding:16}}>{[0,1,2,3,4].map(i=><Skeleton key={i} h={20} style={{marginBottom:14}}/>)}</div>
+      :mode==="error"?<div className="banner" style={{margin:16}}>⚠ 任务列表加载失败（500）— <a>重试</a></div>
+      :visible.length===0?<div className="empty"><div className="big">「{tab}」是空的</div>{tab==="dlq"?"DLQ 队列是空的——任务重试耗尽才会进入这里。":"当前状态下没有任务。"} <a onClick={()=>setTab("all")}>查看 all</a></div>
+      :<table><thead><tr><th>task_id</th><th>action</th><th className="num">attempt</th><th>状态</th><th>发布时间</th><th>完成时间</th></tr></thead>
+        <tbody>{visible.map(t=><tr key={t.task_id} onClick={()=>openDrawer(t)}>
+          <td className="num" style={{color:"var(--c-primary)"}}>{t.task_id}</td>
+          <td>{t.action}</td><td className="num">{t.attempt}</td>
+          <td><StateBadge s={t.state}/></td>
+          <td className="num faint">{t.created}</td><td className="num faint">{t.done}</td>
+        </tr>)}</tbody></table>}
+      <div style={{padding:"10px 16px",display:"flex",justifyContent:"space-between",fontSize:"var(--fs-xs)"}} className="faint">
+        <span>共 {visible.length} 条</span><span>每页 50 条 ‹ 1 ›</span>
+      </div>
+    </div>
+  </div>;
+}
+
+// ---------- 任务浏览（全局） ----------
+function TasksPage(){
+  const {tasks,openDrawer}=React.useContext(AppCtx);
+  return <div>
+    <TopBar title="任务"><span className="muted" style={{fontSize:"var(--fs-xs)"}}>跨队列搜索 task_id / action / payload</span></TopBar>
+    <div className="row" style={{marginBottom:"var(--sp-3)"}}>
+      <input placeholder="搜索 task_id / action / payload…" style={{flex:1,maxWidth:360}}/>
+      <select><option>全部队列</option><option>stockev:quote:5min</option><option>stockev:day-kline:fetch</option><option>stockev:store</option></select>
+      <select><option>全部状态</option>{STATES.filter(s=>s!=="all").map(s=><option key={s}>{s}</option>)}</select>
+    </div>
+    <div className="card">
+      <table><thead><tr><th>队列</th><th>task_id</th><th>action</th><th className="num">attempt</th><th>状态</th><th>发布时间</th></tr></thead>
+      <tbody>{tasks.map(t=><tr key={t.task_id} onClick={()=>openDrawer(t)}>
+        <td className="faint">quote:5min</td><td className="num" style={{color:"var(--c-primary)"}}>{t.task_id}</td><td>{t.action}</td><td className="num">{t.attempt}</td><td><StateBadge s={t.state}/></td><td className="num faint">{t.created}</td>
+      </tr>)}</tbody></table>
+    </div>
+  </div>;
+}
+
+// ---------- Worker 监控 ----------
+function WorkersPage(){
+  const {workers,confirm}=React.useContext(AppCtx);
+  const stale=workers.filter(w=>w.stale).length;
+  return <div>
+    <TopBar title="Worker"/>
+    <div className="kpis">
+      <div className="card kpi"><div className="lbl">在线</div><div className="v num" style={{color:"var(--c-success)"}}>{workers.length-stale}</div></div>
+      <div className="card kpi" style={stale?{borderColor:"rgba(248,81,73,.5)"}:null}><div className="lbl">失联</div><div className="v num" style={stale?{color:"var(--c-danger)"}:null}>{stale}</div></div>
+      <div className="card kpi"><div className="lbl">processing 总数</div><div className="v num">{workers.reduce((a,w)=>a+w.processing,0)}</div></div>
+      <div className="card kpi"><div className="lbl">Redis 内存</div><div className="v num">62%</div></div>
+    </div>
+    <div className="card" style={{marginBottom:"var(--sp-4)"}}>
+      <table><thead><tr><th>worker_id</th><th>队列</th><th>心跳</th><th className="num">processing</th><th>状态</th><th></th></tr></thead>
+      <tbody>{workers.map(w=><tr key={w.worker_id} style={{cursor:"default"}}>
+        <td style={{fontWeight:500}}>{w.worker_id}</td><td>{w.queue}</td><td className="num faint">{w.heartbeat}</td><td className="num">{w.processing}</td>
+        <td>{w.stale?<Badge c="danger">⚠ 失联</Badge>:<span className="row" style={{gap:6}}><Dot c="var(--c-success)" pulse/>在线</span>}</td>
+        <td>{w.stale&&<button className="btn sm danger" onClick={()=>confirm("恢复失联 Worker 的任务",`将把 ${w.worker_id} processing 中的 ${w.processing} 个任务移回主队列。`)}>恢复任务</button>}</td>
+      </tr>)}</tbody></table>
+    </div>
+    <div className="card" style={{padding:"var(--sp-4)"}}>
+      <div style={{fontWeight:600,marginBottom:12}}>Redis 内存</div>
+      <div style={{height:8,background:"var(--bg-base)",borderRadius:4,overflow:"hidden"}}><div style={{width:"62%",height:"100%",background:"var(--c-primary)"}}/></div>
+      <div className="row" style={{justifyContent:"space-between",marginTop:8,fontSize:"var(--fs-xs)"}}><span className="faint">used 1.2G · peak 1.4G</span><span className="faint">阈值 2G</span></div>
+    </div>
+  </div>;
+}
+
+// ---------- 告警中心 ----------
+function AlertsPage(){
+  const {alerts,confirm}=React.useContext(AppCtx);
+  const [tab,setTab]=useState("open");
+  const [showRules,setShowRules]=useState(false);
+  return <div>
+    <TopBar title="告警中心"><button className="btn sm" onClick={()=>setShowRules(!showRules)}>规则说明 ⓘ</button></TopBar>
+    {showRules&&<div className="card" style={{padding:"var(--sp-4)",marginBottom:"var(--sp-4)",fontSize:"var(--fs-sm)"}}>
+      <div className="muted" style={{lineHeight:2}}>· 队列 DLQ &gt; 0 → 严重（数据源 queue_stats.dlq）<br/>
+      · 最近 50 条历史失败率 &gt; 5% → 警告<br/>· Worker 心跳超时 / stale → 严重（数据源 list_workers / diagnose）<br/>
+      · ready 持续 &gt; 10000（10 分钟）→ 警告 · 出现 deadline_missed/expired → 警告 · Redis 内存超阈值 → 严重</div>
+    </div>}
+    <div className="tabs">
+      <button className={"tab"+(tab==="open"?" active":"")} onClick={()=>setTab("open")}>未处理 <span className="n">({alerts.length})</span></button>
+      <button className={"tab"+(tab==="done"?" active":"")} onClick={()=>setTab("done")}>已处理</button>
+    </div>
+    <div className="card">
+      {tab==="done"?<div className="empty"><div className="big">暂无已处理记录</div>处理告警后点「标记已处理」，记录会保存在本浏览器。</div>
+      :alerts.length===0?<div className="empty"><div className="big">🎉 当前没有告警</div>系统按上述规则自动巡检，出现异常会在这里列出。</div>
+      :alerts.map((a,i)=><div key={i} className="alert-item">
+        <Dot c={a.sev==="danger"?"var(--c-danger)":"var(--c-warning)"}/>
+        <div className="body"><div className="title">{a.title}</div><div className="meta num">{a.time} · 规则 {a.rule}</div></div>
+        <button className="btn sm">定位</button>
+        <button className="btn sm" onClick={()=>confirm("标记已处理","该告警将在本浏览器标记为已处理；同类问题再次出现时会重新告警。")}>标记已处理</button>
+      </div>)}
+    </div>
+  </div>;
+}
+
+// ---------- 任务详情抽屉 ----------
+function TaskDrawer(){
+  const {drawer,closeDrawer,confirm}=React.useContext(AppCtx);
+  const t=drawer;
+  if(!t)return null;
+  const terminal=["completed","failed","skipped","cancelled","deadline_missed","dlq","expired"].includes(t.state);
+  return <>
+    <div className="drawer-mask" onClick={closeDrawer}/>
+    <div className="drawer">
+      <div className="hd">
+        <div className="row" style={{justifyContent:"space-between"}}>
+          <span style={{fontWeight:600,fontSize:"var(--fs-lg)"}}>{t.action}</span>
+          <span className="row"><StateBadge s={t.state}/><button onClick={closeDrawer} style={{fontSize:18,color:"var(--text-secondary)"}}>✕</button></span>
+        </div>
+        <div className="row" style={{gap:12,marginTop:6,fontSize:"var(--fs-xs)"}}><span className="faint">task_id <a>{t.task_id}</a>（复制）</span><span className="faint">队列 stockev:quote:5min</span><span className="faint">attempt {t.attempt}/3</span></div>
+      </div>
+      <div className="bd">
+        <div className="sec"><h3>时间线</h3>
+          <ul className="tl">
+            <li><span className="t" style={{background:"var(--c-primary)"}}/><span className="time num">10:00:05</span>投递 <span className="faint">logical_key=quote:AAPL:20260921T1000</span></li>
+            <li><span className="t" style={{background:"var(--c-primary)"}}/><span className="time num">10:00:07</span>开始执行 <span className="faint">worker=fetch-3</span></li>
+            <li><span className="t" style={{background:"var(--c-danger)"}}/><span className="time num">10:00:12</span>失败 ConnectionError → 30s 后重试</li>
+            <li><span className="t" style={{background:"var(--c-warning)"}}/><span className="time num">10:00:42</span>重试执行 attempt=2</li>
+            <li><span className="t" style={{background:"var(--c-warning)"}}/><span className="time num">10:30:00</span>下次执行预估 <span className="faint">（delay 队列中）</span></li>
+          </ul>
+        </div>
+        <div className="sec"><h3>Payload <a style={{marginLeft:8,fontSize:"var(--fs-xs)"}}>复制</a></h3>
+          <pre className="json">{'{\n  "symbol": "AAPL",\n  "slot": "20260921T1000"\n}'}</pre>
+        </div>
+        <div className="sec"><h3>Result</h3>
+          {terminal&&t.state!=="completed"
+            ? <div className="faint" style={{fontSize:"var(--fs-sm)"}}>任务尚无结果（未成功完成）</div>
+            : <pre className="json">{'{\n  "price": 254.32,\n  "fetched_at": "…"\n}'}</pre>}
+        </div>
+        <div className="sec"><h3>血缘</h3>
+          <div style={{fontSize:"var(--fs-sm)"}} className="muted">replay_of <a>91bd47fe ↗</a> · 未重放</div>
+        </div>
+      </div>
+      <div className="ft">
+        {t.state==="dlq"&&<button className="btn" onClick={()=>confirm("从 DLQ 重入队","将创建新 task_id 重新入队，原记录保留。")}>从 DLQ 重入队</button>}
+        {terminal&&<button className="btn primary" onClick={()=>confirm("重放为新任务","将创建新 task_id 从 attempt=0 重新执行，原任务保持终态。")}>重放为新任务</button>}
+        <span style={{flex:1}}/>
+        <button className="btn danger" onClick={()=>confirm("删除任务",`将删除任务 ${t.task_id} 及其历史记录。`)}>删除</button>
+      </div>
+    </div>
+  </>;
+}
+
+// ---------- 确认弹窗 ----------
+function ConfirmDialog(){
+  const {dialog,closeDialog}=React.useContext(AppCtx);
+  if(!dialog)return null;
+  return <div className="modal-mask" onClick={closeDialog}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <h3>{dialog.title}</h3><p>{dialog.body}</p>
+      <div className="acts"><button className="btn" onClick={closeDialog}>取消</button><button className="btn danger" onClick={closeDialog}>确认执行</button></div>
+    </div>
+  </div>;
+}
+
+// ---------- App ----------
+function App(){
+  const [page,setPage]=useState("overview");
+  const [drawer,setDrawer]=useState(null);
+  const [dialog,setDialog]=useState(null);
+  const [mode,setMode]=useState("default");
+  const ctx={page,setPage,queues:DEMO.queues,workers:DEMO.workers,alerts:DEMO.alerts,tasks:DEMO.tasks,mode,
+    drawer,dialog,openDrawer:setDrawer,closeDrawer:()=>setDrawer(null),
+    confirm:(title,body)=>setDialog({title,body}),closeDialog:()=>setDialog(null)};
+  return <AppCtx.Provider value={ctx}>
+    <div className="shell">
+      <SideNav/>
+      <main className="main">
+        {page==="overview"&&<OverviewPage/>}
+        {page==="queues"&&<QueueListPage/>}
+        {page==="tasks"&&<TasksPage/>}
+        {page==="workers"&&<WorkersPage/>}
+        {page==="alerts"&&<AlertsPage/>}
+        {page==="detail"&&<QueueDetailPage/>}
+        {page!=="detail"&&page!=="overview"&&page!=="queues"&&<div/>}
+      </main>
+    </div>
+    <TaskDrawer/><ConfirmDialog/>
+    <div className="demo-bar">
+      <span className="lab">演示状态：</span>
+      {[["default","默认"],["loading","加载"],["error","错误"],["empty","空"],["detail","队列详情页"]].map(([k,l])=>
+        <button key={k} className={mode===k||(k==="detail"&&page==="detail")?"on":""} onClick={()=>{if(k==="detail"){setMode("default");setPage("detail");}else{setPage("overview");setMode(k);}}}>{l}</button>)}
+    </div>
+  </AppCtx.Provider>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
