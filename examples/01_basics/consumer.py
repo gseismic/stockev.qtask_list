@@ -1,12 +1,11 @@
 """最简用法：不使用 Worker，直接用 SmartQueue 生产 + 消费一个任务。
 
-运行前需要本地 Redis（redis://localhost:6379/0）。先启动消费者（终端 2），
-再运行生产者（终端 1）::
+运行前需要本地 Redis（redis://localhost:6379/0）::
 
     # 终端 1（先启动，阻塞等待任务）
     python examples/01_basics/consumer.py
 
-    # 终端 2
+    # 终端 2：投递任务
     python examples/01_basics/producer.py
 
 核心要点：

@@ -29,7 +29,8 @@ python -m cli push stockev_list:news-discover \
   '{"action":"discover_news","urls":["https://example.com/a","https://example.com/b"]}'
 ```
 
-- 两层身份互不干扰：发现任务身份 = 调度窗口；条目任务身份 = `news:{sha256(url)}`
+- 两层身份互不干扰：发现任务建议用调度窗口身份（由 scheduler 提供）；
+  条目任务身份 = `news:{sha256(url)}`
 - 演示 `context.stop_requested` 协作式停止：停机时不做 fan-out，下轮重新发现仍被去重
 
 ## 3. Reconciler 幂等补齐（reconciler.py）

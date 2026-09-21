@@ -8,7 +8,11 @@
 - not_before_at（兼容 delay_seconds）：任务最早何时**可以被消费**，到点前放在
   delay ZSET，由 move_delay()（或 Worker 维护线程）搬回主队列；
 - start_deadline_at（兼容 expire_seconds）：任务最晚何时**必须开始执行**。
-  pop 时已过截止 → 不再执行，标记 skipped/deadline_missed（expired 视图）。
+  pop 时已过截止 → 拒绝执行并记录 outcome=skipped；滞留在队列里未消费的
+  过期任务则出现在 deadline_missed（expired 视图）。
+
+注意：本脚本假设 demo:timing-demo 队列为空；若上次运行中断，先清理：
+    python -m cli clear demo:timing-demo --include-history --force
 """
 
 from pathlib import Path
@@ -67,7 +71,7 @@ def main() -> None:
         queue.ack(raw_msg)
     time.sleep(3)
     payload, raw_msg = queue.pop_no_wait()
-    print(f"  截止后 pop: {'拒绝（正确）' if raw_msg is None else '意外取到'}")
+    print(f"  截止后 pop: {'拒绝（正确，队列中已无可执行任务）' if raw_msg is None else '意外取到'}")
 
     print("\n== 3. 滞留任务过期 -> deadline_missed 视图 ==")
     # deadline_missed 不是独立存储状态，而是从主队列/重试/延迟容器里

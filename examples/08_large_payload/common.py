@@ -12,10 +12,13 @@
     python examples/08_large_payload/producer.py
 
 机制：
-- push 时 payload 序列化后超过 large_threshold（默认 50KB）→ 自动 POST 上传到
-  RemoteStorage 服务，队列里只存 {"_large": true, "key": ...} 引用；
-- pop 时检测到引用 → 自动 GET 下载还原完整 payload，消费方无感知；
-- 服务端按 retain_until 自动清理过期对象（默认 TTL 见服务端 --ttl-days）。
+- push 时 payload 序列化后的**原始大小**超过 large_threshold（默认 50KB，判断
+  发生在压缩之前）→ 自动 POST 上传到 RemoteStorage 服务，队列里只存
+  kind=external 的引用（key/size/sha256，不含数据本体）；
+- pop 时检测到 external 引用 → 自动 GET 下载并校验 SHA256，还原完整 payload，
+  消费方无感知；
+- 服务端按 retain_until 自动清理过期对象（默认 TTL 见服务端 --ttl-days），
+  任务重试会自动延长保留期。
 """
 
 from pathlib import Path

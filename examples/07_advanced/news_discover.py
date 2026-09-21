@@ -5,9 +5,11 @@
 
 这是「动态增长列表」的标准模式::
 
-    news-discover（身份=调度窗口） --fan-out--> news-fetch（身份=URL 内容哈希）
+    news-discover（建议身份=调度窗口） --fan-out--> news-fetch（身份=URL 内容哈希）
 
 发现任务随窗口产生新身份，条目任务永远复用内容身份，两层互不干扰。
+本例的发现任务由外部命令投递、未设 logical_key；接入 07_advanced/scheduler.py
+的调度窗口身份后，cron 重复调用即可幂等。
 """
 
 from __future__ import annotations
@@ -40,7 +42,11 @@ worker = Worker(
 
 
 def _url_key(url: str) -> str:
-    """用 URL 内容生成稳定身份，避免 query 顺序之外的随机字段参与去重。"""
+    """用 URL 内容生成稳定身份：同一 URL 无论被多少轮发现命中都映射到同一身份。
+
+    注意：query 参数顺序不同会得到不同哈希 —— 需要归一化 URL 时应先
+    规范化再计算哈希。
+    """
 
     # 同一 URL 无论被多少轮发现命中，哈希相同 => 只保留一个任务（或一份终态保留）
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()

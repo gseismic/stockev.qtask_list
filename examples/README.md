@@ -15,7 +15,7 @@
 | `06_pipeline/` | 三级跨 namespace 流水线（emissions 级联） | 4 个终端 |
 | `07_advanced/` | 确定性调度、动态 fan-out、Reconciler | 各自独立 |
 | `08_large_payload/` | 大 payload 自动外存（RemoteStorage） | 3 个终端 |
-| `09_admin_ops/` | QueueAdmin 诊断、查任务、重放、恢复 | 2 个终端 |
+| `09_admin_ops/` | QueueAdmin 诊断、查任务、重放、恢复 | 3 个终端（复用 02） |
 
 每个目录内的 README.md 有详细的运行步骤与学习点说明，请先阅读。
 

@@ -1,8 +1,8 @@
 """用 Worker 消费任务：handler 注册、重试、错误分类的最小完整示例。
 
-运行方式（单进程即可，Worker 会自动处理 pop/ack/fail/recover）::
+运行方式（两个终端）::
 
-    # 终端 1：启动 Worker
+    # 终端 1：启动 Worker（自动处理 pop/ack/fail/recover）
     python examples/02_worker/worker.py
 
     # 终端 2：投递任务

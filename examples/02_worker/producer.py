@@ -1,6 +1,6 @@
-"""向 02_worker 的 Worker 投递三种任务：正常、可重试抖动、永久失败。
+"""向 02_worker 的 Worker 投递四种任务：正常、可重试抖动、永久失败、未知 action。
 
-观察方法（另开终端）::
+先启动 worker.py（终端 1），再运行本脚本（终端 2）。观察方法（另开终端）::
 
     python -m cli watch demo:jobs          # 实时看各子队列深度
     python -m cli peek demo:jobs --state dlq   # 看进入死信的任务
@@ -33,6 +33,7 @@ def main() -> None:
         TaskSpec(action="no_such_handler", payload={}),
     ]
     for result in queue.enqueue_many(specs):
+        # 本示例不设 logical_key，每次运行都是新任务；打印 task_id 便于对照历史
         print(f"{result.logical_key or result.task_id} -> {result.reason}")
     print("\n观察: python -m cli watch demo:jobs")
     print("死信: python -m cli peek demo:jobs --state dlq")

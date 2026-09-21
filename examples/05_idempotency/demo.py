@@ -11,6 +11,9 @@
 - enqueue/enqueue_many 永不因重复抛异常，而是返回 EnqueueResult：
   reason ∈ enqueued / duplicate_active / duplicate_retained / superseded；
 - on_duplicate=ALLOW_NEW 可以显式允许同键新任务（如用户手动重跑）。
+
+注意：身份按「股票 + 日期 + 分钟桶」构造。同一分钟内重复运行会看到
+duplicate_* 输出 —— 这正是去重在生效，不是错误；跨分钟运行则得到新身份。
 """
 
 from pathlib import Path
@@ -32,7 +35,9 @@ queue = SmartQueue(REDIS_URL, QUEUE_NAME, namespace=NAMESPACE)
 
 def main() -> None:
     now = datetime.now(timezone.utc)
-    key = f"report:AAPL:{now.date().isoformat()}"  # 业务身份：股票+日期
+    # 业务身份 = 任务类型:主体:分钟桶。确定性字段保证「同一意图」映射到同一
+    # 身份；不放入进程启动时间等随机因素，重复运行/补跑天然幂等
+    key = f"report:AAPL:{now.strftime('%Y%m%dT%H%M')}"
 
     def spec(action: str) -> TaskSpec:
         return TaskSpec(

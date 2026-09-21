@@ -1,11 +1,12 @@
 """股票数据 Pipeline 的 V2 任务生产器。
 
 流程：``fetch_stock -> calculate_ma -> store_result``。身份、窗口和截止时间使用
-``TaskSpec`` 表达，重复运行同一交易日不会重复占用队列。
+``TaskSpec`` 表达：时间向下取整到分钟桶，同一分钟内重复运行会命中同一
+``logical_key``，重复投递被去重拒绝而不是产生重复任务。
 
 职责边界：生产者只负责投递第一级 ``stockev_list:fetch``；后两级由各阶段 Worker
-通过 ``TaskResult.emissions`` 自动投递（见 stockev/fetch_worker.py 与
-finance/calculate_worker.py）。运行方式见 examples/README.md。
+通过 ``TaskResult.emissions`` 自动投递（见 06_pipeline/stockev/fetch_worker.py 与
+06_pipeline/finance/calculate_worker.py）。运行方式见 06_pipeline/README.md。
 """
 
 from datetime import datetime, timedelta, timezone
@@ -37,7 +38,8 @@ def main():
     # 时间向下取整到分钟作为确定性时间桶：同一分钟内重复运行会得到同一个
     # logical_key，重复投递被拒绝而不是产生重复任务。
     slot = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    # start_deadline_at = 最晚允许开始执行的时刻；pop 时已超期则标记 skipped
+    # start_deadline_at = 最晚允许开始执行的时刻；pop 时已超期则拒绝执行
+    # （outcome=skipped），不会产生迟到数据
     deadline = slot + timedelta(minutes=7)
     specs = [
         TaskSpec(
@@ -51,7 +53,9 @@ def main():
             },
             # 业务身份 = 任务类型:主体:时间桶；live 期间同键任务至多一个
             logical_key=f"pipeline:quote:{sym}:{slot.strftime('%Y%m%dT%H%MZ')}",
-            scheduled_for=slot,                    # 计划时刻，到点前在 delay ZSET 中
+            # 计划时刻：纯元数据，随历史/血缘透出；不会延迟消费。
+            # 需要延迟执行请用 not_before_at（见 04_delay_deadline）
+            scheduled_for=slot,
             start_deadline_at=deadline,            # 执行截止
             dedup_until=slot + timedelta(days=2),  # 终态身份保留期（防重复回补）
         )

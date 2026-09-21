@@ -16,7 +16,8 @@ from qtask_list import TaskSpec  # noqa: E402
 
 
 def main() -> None:
-    # 约 100KB 的模拟数据集：超过 10KB 阈值，将自动外存
+    # 约 100KB 的模拟数据集（序列化后原始大小）：超过 10KB 阈值，将自动外存。
+    # 即使 zstd 压缩后能放得下，external 判断也优先于压缩 —— 大数据不进 Redis
     big_dataset = {
         "rows": [
             {"id": i, "value": f"row-{i}-" + "x" * 64} for i in range(1000)
@@ -29,7 +30,7 @@ def main() -> None:
         )
     )
     print(f"投递结果: {result.as_dict()}")
-    print("队列引用中只存外存 key，Redis 内 payload 极小。")
+    print("队列引用中只存外存 key（kind=external），Redis 内不含数据本体。")
     print(f"查看: python -m cli peek {NAMESPACE}:{QUEUE_NAME} --state ready --json")
 
 

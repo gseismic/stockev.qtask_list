@@ -4,6 +4,9 @@
 
     python examples/03_retry_dlq/demo.py
 
+注意：本脚本假设 demo:dlq-demo 队列为空；若上次运行中断，先清理：
+    python -m cli clear demo:dlq-demo --include-history --force
+
 流程说明：
 1. 投递一个必然失败的任务（max_attempts=2）
 2. 用 SmartQueue 自消费两次，模拟 Worker 耗尽重试 → 任务进入 DLQ
@@ -44,7 +47,8 @@ def consume_and_fail(reason: str) -> None:
     if raw_msg is None:
         print("  (队列空)")
         return
-    print(f"  执行失败: {payload['order_id']} ({reason})")
+    order_id = (payload or {}).get("order_id", "?")
+    print(f"  执行失败: {order_id} ({reason})")
     # fail() 自动判断：attempt < max_attempts → 进 delay 等待重试；否则进 DLQ
     queue.fail(raw_msg, reason, code="simulated_failure")
 
