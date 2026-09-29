@@ -6,7 +6,7 @@ import { EmptyState, ErrorBanner, Skeleton } from "../components/ui";
 import { fmtTime } from "../components/ui";
 
 export function AlertsPage() {
-  const { alerts, error, loading } = useAppData();
+  const { queues, alerts, error, loading, reload } = useAppData();
   const [tab, setTab] = useState<"open" | "resolved">("open");
   const [showRules, setShowRules] = useState(false);
   const [version, setVersion] = useState(0);
@@ -25,13 +25,13 @@ export function AlertsPage() {
   return (
     <div className="page">
       <h1 className="page-title">告警中心</h1>
-      <p className="page-desc">DLQ 堆积、失败率、失联 Worker、积压、过期与 Redis 内存的聚合信号。</p>
-      {error && <ErrorBanner error={error} onRetry={() => window.location.reload()} />}
+      <p className="page-desc">DLQ、无人消费、失败率、失联 Worker、积压、过期与 Redis 内存的聚合信号。</p>
+      {error && <ErrorBanner error={error} onRetry={reload} />}
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
         <div className="seg">
           <button className={tab === "open" ? "on" : ""} onClick={() => setTab("open")}>
-            未处理 ({alerts.length})
+            未处理 ({queues ? alerts.length : "—"})
           </button>
           <button className={tab === "resolved" ? "on" : ""} onClick={() => setTab("resolved")}>
             已处理 ({resolvedKeys.length})
@@ -73,13 +73,15 @@ export function AlertsPage() {
         </div>
       )}
 
-      {loading && !alerts ? (
+      {loading && !queues ? (
         <Skeleton lines={5} height={30} />
+      ) : !queues ? (
+        <EmptyState icon="⚠" title="告警状态不可判定">监控数据不可用，连接恢复后请刷新。</EmptyState>
       ) : tab === "open" ? (
         alerts.length === 0 ? (
-          <EmptyState icon="🎉" title="当前没有告警">
+          <EmptyState icon={error ? "⚠" : "🎉"} title={error ? "告警数据已过时" : "当前没有告警"}>
             <p className="muted">
-              告警规则：DLQ&gt;0、累计失败率&gt;5%、stale worker、ready&gt;10000 持续 10 分钟、任务过期、Worker 心跳超时、Redis 内存超限。
+              {error ? "最近一次刷新失败，不能据此判断当前是否有告警。" : "告警规则：DLQ>0、ready 有任务但无在线 Worker、累计失败率>5%、stale worker、ready>10000 持续 10 分钟、任务过期、Worker 心跳超时、Redis 内存超限。"}
             </p>
           </EmptyState>
         ) : (

@@ -4,11 +4,10 @@ import { useAppData } from "../appData";
 import { ConfirmDialog, ErrorBanner, KpiCard, Skeleton, StateBadge, fmtTime } from "../components/ui";
 
 export function WorkersPage() {
-  const { workers, health, error, loading } = useAppData();
+  const { workers, health, error, loading, reload } = useAppData();
   const [confirm, setConfirm] = useState<{ queue: string; workerId: string; count: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [opError, setOpError] = useState<string | null>(null);
-  const [, setReloadKey] = useState(0);
 
   const online = (workers ?? []).filter((w) => w.active);
   const lost = (workers ?? []).filter((w) => !w.active);
@@ -24,7 +23,7 @@ export function WorkersPage() {
     try {
       await api.recoverQueue(queue, false);
       setConfirm(null);
-      setReloadKey((k) => k + 1);
+      reload();
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -36,10 +35,10 @@ export function WorkersPage() {
     <div className="page">
       <h1 className="page-title">Worker 监控</h1>
       <p className="page-desc">Worker 心跳与失联恢复；Redis 内存水位。</p>
-      {error && <ErrorBanner error={error} onRetry={() => window.location.reload()} />}
+      {error && <ErrorBanner error={error} onRetry={reload} />}
       {opError && <ErrorBanner error={opError} onRetry={() => setOpError(null)} />}
 
-      <div className="kpi-row">
+      {workers && <div className="kpi-row">
         <KpiCard label="在线 Worker" value={online.length} />
         <KpiCard label="失联 Worker" value={lost.length} danger={lost.length > 0} />
         <KpiCard label="processing 总数" value={totalProcessing} />
@@ -49,16 +48,18 @@ export function WorkersPage() {
           danger={memDanger}
           hint={mem?.maxmemory_human ? `峰值 ${mem.used_memory_peak_human ?? "—"} · 上限 ${mem.maxmemory_human}` : "未设置 maxmemory"}
         />
-      </div>
+      </div>}
 
       {loading && !workers ? (
         <Skeleton lines={6} height={20} />
+      ) : !workers ? (
+        <div className="empty">Worker 数据不可用，请检查 Redis 连接后刷新。</div>
       ) : workers && workers.length === 0 ? (
         <div className="empty">
           <div className="big">🧑‍🏭</div>
           <div style={{ fontWeight: 600 }}>没有在线 Worker</div>
           <p className="muted">参考 README 启动 Worker，例如：</p>
-          <code>qtask worker --module your_worker_module --queues "ns:queue"</code>
+          <code>qtask worker --module your_worker_module:worker</code>
           <p className="faint">确认后这里会出现心跳。</p>
         </div>
       ) : (
@@ -105,7 +106,7 @@ export function WorkersPage() {
         </div>
       )}
 
-      <div className="card" style={{ marginTop: 20 }}>
+      {health && <div className="card" style={{ marginTop: 20 }}>
         <h2 className="card-title">Redis 内存</h2>
         {memPct !== null && (
           <div className="pbar" style={{ height: 12, marginBottom: 10 }} title={`${memPct}%`}>
@@ -126,9 +127,9 @@ export function WorkersPage() {
           <dt>上限 maxmemory</dt>
           <dd className="num">{mem?.maxmemory_human ?? "未设置"}</dd>
           <dt>状态</dt>
-          <dd>{memDanger ? <span className="badge c-danger">超过告警阈值</span> : <span className="badge c-success">healthy</span>}</dd>
+          <dd>{health.status === "error" ? <span className="badge c-danger">不可用</span> : memDanger ? <span className="badge c-danger">超过告警阈值</span> : <span className="badge c-success">正常</span>}</dd>
         </div>
-      </div>
+      </div>}
 
       <ConfirmDialog
         open={confirm !== null}

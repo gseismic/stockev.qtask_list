@@ -481,6 +481,8 @@ worker.run()
 ```bash
 # 查看所有队列状态
 qtask status
+qtask status --namespace stockev --problems-only
+qtask status --namespace stockev --problems-only --json  # 脚本消费完整状态
 
 # 查看指定队列
 qtask status stockev_list:fetch
@@ -548,16 +550,18 @@ Dashboard 是 React 单页应用（构建产物已随包发布，无需 Node 环
 
 | 页面 | 路由 | 用途 |
 |------|------|------|
-| 总览 | `/` | 全局 KPI（活跃队列/总剩余/合计速率/异常队列）+ 按 namespace 分组的队列进度矩阵（剩余/完成·1h/速率/ETA/停滞判定）+ 最新告警摘要 |
+| 总览 | `/` | 全局 KPI（活跃队列/总待处理/合计估计速率/异常队列）+ 按 namespace 分组的运行矩阵（待处理/浏览器观测期完成/速率/ETA/异常）+ 最新告警摘要；观测比不是批次完成率 |
 | 队列 | `/queues` | 队列卡片、筛选与搜索；进入详情做操作 |
-| 队列详情 | `/queues/:name` | 完整状态 Tabs（ready/processing/retry/retry_wait/delay/dlq/completed/failed/skipped/cancelled/deadline_missed/history）、任务搜索与时间筛选、诊断、投递测试任务、队列级操作（drain retry/重放 DLQ/恢复 stale/清理历史/清空/删除） |
-| 任务 | `/tasks` | 跨队列搜索 task_id/action/payload，URL 可分享；task_id 精确命中直接打开详情抽屉 |
+| 队列详情 | `/queues/:name` | 完整状态 Tabs（ready/processing/retry/retry_wait/delay/dlq/completed/failed/skipped/cancelled/deadline_missed/history）、任务搜索与时间筛选、诊断、手工投递、队列级操作（drain retry/重放 DLQ/恢复 stale/清理历史/清空/删除） |
+| 任务 | `/tasks` | 跨队列搜索 task_id/action/payload，并可按 action 与发布时间/完成时间筛选；task_id 精确命中直接打开详情抽屉 |
 | 任务详情抽屉 | 表格内点击 | 任务时间线、payload/result 懒加载（支持外存/压缩还原）、血缘（replay_of/replayed_by）、按状态显隐的重放/重入队/删除 |
 | Worker | `/workers` | 心跳与失联标记、失联任务一键恢复、Redis 内存水位 |
-| 告警 | `/alerts` | DLQ 堆积、失败率偏高、stale worker、ready 积压、任务过期、Worker 失联、Redis 内存超限的聚合列表；可定位跳转、标记已处理 |
+| 告警 | `/alerts` | DLQ 堆积、ready 无 Worker、累计失败率偏高、stale worker、ready 积压、任务过期、Worker 失联、Redis 内存超限的聚合列表；可定位跳转、标记已处理 |
 | 教程 | `/guide` | 说人话的概念手册（状态流转、关键数字、去重、操作速查表） |
 
 其他能力：白天/黑夜双主题（记忆在浏览器）、自动刷新（5s/15s/30s/关，出错自动降频 30s）、危险操作（清空/删除）需输入队列名二次确认、未登录自动跳转 `/login`。
+
+总览的完成量和速率由当前浏览器采样，至少观测 30 秒后才显示速率；没有调度器提供的“本轮期望量”时无法计算批次完成百分比。只有 ready 积压、在线 Worker 且连续 2 分钟无完成时才显示“疑似停滞”；纯延迟队列显示“等待调度”。
 
 远程查看时应启用登录，并显式监听远程地址：
 
@@ -580,6 +584,7 @@ qtask dashboard --host 0.0.0.0 --no-open
 ```
 
 设置 `QTASK_DASHBOARD_PASSWORD` 后，访问 `/` 会先跳转到 `/login`，所有 `/api/*` 管理接口以及 SPA 客户端路由（如 `/queues`）也会校验登录会话。不设置密码时认证默认关闭，服务可直接访问。公网部署建议放在 HTTPS 反向代理后，并设置 `QTASK_DASHBOARD_SECURE_COOKIE=1` 或 CLI 参数 `--secure-cookie`。
+CLI 绑定非 loopback 地址且未配置认证时会拒绝启动；确需在可信网络无认证运行时，必须显式传 `--allow-unauthenticated`。直接运行 `uvicorn` 不经过此 CLI 保护，请自行配置认证。
 
 也可以不用 CLI，直接用 uvicorn 部署（适合 systemd/容器）：
 

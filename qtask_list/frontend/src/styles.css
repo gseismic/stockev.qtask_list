@@ -187,6 +187,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   gap: 12px; align-items: center; padding: 9px 16px; border-top: 1px solid var(--border-default);
   font-size: 13px; cursor: pointer;
 }
+.matrix-columns {
+  display: grid; grid-template-columns: minmax(180px, 1.4fr) minmax(120px, 1fr) 90px 90px 80px 90px 110px;
+  gap: 12px; padding: 0 16px 6px; color: var(--text-faint); font-size: 12px;
+}
 .matrix-row:hover { background: var(--hover); }
 .matrix-row.abnormal { background: var(--danger-dim); }
 .matrix-row .qname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

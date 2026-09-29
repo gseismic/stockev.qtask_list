@@ -8,14 +8,15 @@ export interface Sample {
 
 export interface QueueProgress {
   remaining: number;
-  completed1h: number | null;
+  completedObserved: number | null;
   ratePerMin: number | null;
   etaText: string | null;
-  progressPct: number | null;
   stalled: boolean;
 }
 
 const WINDOW_MS = 60 * 60 * 1000;
+const MIN_RATE_MS = 30 * 1000;
+const STALL_MS = 2 * 60 * 1000;
 
 function remainingOf(stats: Record<string, number>): number {
   return (stats.queue ?? 0) + (stats.processing ?? 0) + (stats.retry ?? 0) + (stats.delay ?? 0);
@@ -35,7 +36,9 @@ export class RateSampler {
       const observationIndexed = Number(item.observation_indexed ?? 0);
       if (arr.length && (completed < arr[arr.length - 1].completed ||
         observationIndexed !== arr[arr.length - 1].observationIndexed)) arr.length = 0;
-      arr.push({ ts: now, completed, observationIndexed });
+      if (!arr.length || now - arr[arr.length - 1].ts >= 1000) {
+        arr.push({ ts: now, completed, observationIndexed });
+      }
       while (arr.length > 0 && now - arr[0].ts > WINDOW_MS + 5 * 60 * 1000) arr.shift();
       this.samples.set(name, arr);
     }
@@ -49,10 +52,9 @@ export class RateSampler {
     const remaining = remainingOf(stats);
     const empty: QueueProgress = {
       remaining,
-      completed1h: null,
+      completedObserved: null,
       ratePerMin: null,
       etaText: null,
-      progressPct: null,
       stalled: false,
     };
     if (arr.length < 2) return empty;
@@ -65,19 +67,22 @@ export class RateSampler {
       else break;
     }
     const ref = base ?? arr[0];
-    const completed1h = Math.max(0, last.completed - ref.completed);
-    const spanMin = Math.max((last.ts - ref.ts) / 60000, 1 / 60);
-    const ratePerMin = completed1h / spanMin;
-    const stalled = remaining > 0 && ratePerMin < 0.01;
-    const progressPct =
-      completed1h + remaining > 0 ? (completed1h / (completed1h + remaining)) * 100 : null;
+    const completedObserved = Math.max(0, last.completed - ref.completed);
+    const spanMs = last.ts - ref.ts;
+    const ratePerMin = spanMs >= MIN_RATE_MS ? completedObserved / (spanMs / 60000) : null;
+    let lastProgressTs = arr[0].ts;
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i].completed > arr[i - 1].completed) lastProgressTs = arr[i].ts;
+    }
+    const stalled = (stats.queue ?? 0) > 0 && (stats.active_workers ?? 0) > 0 &&
+      last.ts - lastProgressTs >= STALL_MS;
 
     let etaText: string | null = null;
-    if (remaining > 0 && ratePerMin > 0.01) {
+    if (remaining > 0 && (stats.delay ?? 0) === 0 && ratePerMin !== null && ratePerMin > 0.01) {
       const minutes = remaining / ratePerMin;
       etaText = minutes < 90 ? `约${Math.round(minutes)}min` : `约${(minutes / 60).toFixed(1)}h`;
     }
-    return { remaining, completed1h, ratePerMin, etaText, progressPct, stalled };
+    return { remaining, completedObserved, ratePerMin, etaText, stalled };
   }
 }
 

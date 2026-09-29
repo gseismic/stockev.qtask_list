@@ -37,6 +37,27 @@ export const api = {
   workers: (queue = "") => request(`/api/workers${queue ? `?queue=${q(queue)}` : ""}`),
   diagnose: (queue: string) => request(`/api/queue/${q(queue)}/diagnose`),
   expired: (queue: string, limit = 50) => request(`/api/queue/${q(queue)}/expired?limit=${limit}`),
+  tasks: (opts: {
+    state: string;
+    action?: string;
+    search?: string;
+    limit?: number;
+    cursor?: string;
+    createdAfter?: number;
+    createdBefore?: number;
+    completedAfter?: number;
+    completedBefore?: number;
+  }) => {
+    const params = new URLSearchParams({ status: opts.state, limit: String(opts.limit ?? 50) });
+    if (opts.action) params.set("action", opts.action);
+    if (opts.search) params.set("search", opts.search);
+    if (opts.cursor) params.set("cursor", opts.cursor);
+    if (opts.createdAfter !== undefined) params.set("created_after", String(opts.createdAfter));
+    if (opts.createdBefore !== undefined) params.set("created_before", String(opts.createdBefore));
+    if (opts.completedAfter !== undefined) params.set("completed_after", String(opts.completedAfter));
+    if (opts.completedBefore !== undefined) params.set("completed_before", String(opts.completedBefore));
+    return request(`/api/tasks?${params.toString()}`);
+  },
   queueTasks: (opts: {
     queue: string;
     state: string;

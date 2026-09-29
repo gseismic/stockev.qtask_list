@@ -81,7 +81,7 @@ export function ProgressBar({ done, remaining, dlq }: { done: number; remaining:
   const total = Math.max(done + remaining + dlq, 1);
   const w = (n: number) => `${Math.max((n / total) * 100, n > 0 ? 2 : 0)}%`;
   return (
-    <div className="pbar" title={`完成 ${done} · 剩余 ${remaining} · DLQ ${dlq}`}>
+    <div className="pbar" title={`观测期完成 ${done} · 当前待处理 ${remaining} · DLQ ${dlq}；此比例不是批次完成率`}>
       {done > 0 && <div className="seg-done" style={{ width: w(done) }} />}
       {remaining > 0 && <div className="seg-remaining" style={{ width: w(remaining) }} />}
       {dlq > 0 && <div className="seg-dlq" style={{ width: w(dlq) }} />}

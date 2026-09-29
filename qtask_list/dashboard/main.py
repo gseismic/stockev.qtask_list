@@ -388,13 +388,19 @@ def api_tasks(
     search: Optional[str] = Query(None, description="Search in task data"),
     limit: int = Query(50, ge=1, le=500),
     cursor: Optional[str] = Query(None, description="Search cursor"),
+    created_after: Optional[float] = Query(None, description="Unix timestamp"),
+    created_before: Optional[float] = Query(None, description="Unix timestamp"),
+    completed_after: Optional[float] = Query(None, description="Unix timestamp"),
+    completed_before: Optional[float] = Query(None, description="Unix timestamp"),
     _auth: None = Depends(require_auth),
 ):
     queues = [queue] if queue else None
     selected_state = QueueState(status) if status in QueueState._value2member_map_ else QueueState.all
     try:
         page = admin.search_tasks_page(
-            queues, state=selected_state, action=action, search=search, limit=limit, cursor=cursor
+            queues, state=selected_state, action=action, search=search, limit=limit, cursor=cursor,
+            created_after=created_after, created_before=created_before,
+            completed_after=completed_after, completed_before=completed_before,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

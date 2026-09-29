@@ -6,6 +6,7 @@ export function usePolling<T>(fn: () => Promise<T>, interval: RefreshInterval, d
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const erroredRef = useRef(false);
@@ -20,6 +21,7 @@ export function usePolling<T>(fn: () => Promise<T>, interval: RefreshInterval, d
         const result = await fnRef.current();
         if (stopped) return;
         setData(result);
+        setLastUpdated(Date.now());
         setError(null);
         if (erroredRef.current) {
           erroredRef.current = false;
@@ -55,5 +57,5 @@ export function usePolling<T>(fn: () => Promise<T>, interval: RefreshInterval, d
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interval, tickRef.current, ...deps]);
 
-  return { data, error, loading };
+  return { data, error, loading, lastUpdated };
 }

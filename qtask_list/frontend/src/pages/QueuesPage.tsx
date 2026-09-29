@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAppData } from "../appData";
@@ -11,9 +11,10 @@ type FilterKey = "all" | "active" | "abnormal";
 
 export function QueuesPage() {
   const navigate = useNavigate();
-  const { queues, error, loading } = useAppData();
+  const { queues, error, loading, reload } = useAppData();
   const [params] = useSearchParams();
   const samplerRef = useMemo(() => new RateSampler(), []);
+  const [sampleVersion, setSampleVersion] = useState(0);
   const [nsFilter, setNsFilter] = useState("全部");
   const [nameSearch, setNameSearch] = useState("");
   const filter = (params.get("filter") as FilterKey) || "all";
@@ -22,9 +23,13 @@ export function QueuesPage() {
   const [busy, setBusy] = useState(false);
   const [opError, setOpError] = useState<string | null>(null);
   const [pushQueue, setPushQueue] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  if (queues) samplerRef.observe(queues);
+  useEffect(() => {
+    if (queues) {
+      samplerRef.observe(queues);
+      setSampleVersion((value) => value + 1);
+    }
+  }, [queues, samplerRef]);
 
   const namespaces = useMemo(() => {
     const set = new Set<string>();
@@ -41,9 +46,12 @@ export function QueuesPage() {
       const stats = item as unknown as Record<string, number>;
       const name = String(item.name);
       const progress = samplerRef.progress(name, stats);
+      const noWorker = (stats.queue ?? 0) > 0 && (stats.active_workers ?? 0) === 0;
+      const scheduledOnly = (stats.queue ?? 0) === 0 && (stats.processing ?? 0) === 0 &&
+        (stats.retry ?? 0) === 0 && (stats.delay ?? 0) > 0;
       const abnormal =
-        (stats.dlq ?? 0) > 0 || progress.stalled || (stats.stale_workers ?? 0) > 0 || (stats.deadline_missed ?? 0) > 0;
-      return { name, stats, progress, abnormal };
+        (stats.dlq ?? 0) > 0 || progress.stalled || noWorker || (stats.stale_workers ?? 0) > 0 || (stats.deadline_missed ?? 0) > 0;
+      return { name, stats, progress, abnormal, noWorker, scheduledOnly };
     });
     let out = list;
     if (filter === "active") out = out.filter((c) => c.progress.remaining > 0);
@@ -53,7 +61,7 @@ export function QueuesPage() {
     }
     if (nameSearch) out = out.filter((c) => c.name.toLowerCase().includes(nameSearch.toLowerCase()));
     return out.sort((a, b) => (a.abnormal === b.abnormal ? b.progress.remaining - a.progress.remaining : a.abnormal ? -1 : 1));
-  }, [queues, filter, nsFilter, nameSearch, samplerRef]);
+  }, [queues, filter, nsFilter, nameSearch, samplerRef, sampleVersion]);
 
   const runOp = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -61,7 +69,7 @@ export function QueuesPage() {
     try {
       await fn();
       setConfirm(null);
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -72,13 +80,14 @@ export function QueuesPage() {
   return (
     <div className="page">
       <h1 className="page-title">队列</h1>
-      <p className="page-desc">一个抓取任务类型 = 一个队列（ns:name）。这里管理与入口；盯盘优先用总览。</p>
-      {error && <ErrorBanner error={error} onRetry={() => window.location.reload()} />}
+      <p className="page-desc">按 namespace 管理队列。图形为浏览器观测期完成与当前待处理的参考比；速率与 ETA 是估计值。</p>
+      {error && <ErrorBanner error={error} onRetry={reload} />}
       {opError && <ErrorBanner error={opError} onRetry={() => setOpError(null)} />}
-      {refreshKey < 0 && <span />}
 
       {loading && !queues ? (
         <Skeleton lines={6} height={40} />
+      ) : !queues ? (
+        <EmptyState icon="⚠" title="队列数据不可用">连接恢复后点击顶栏“刷新”。</EmptyState>
       ) : queues && queues.length === 0 ? (
         <EmptyState icon="📭" title="没有队列，去投递第一条任务">
           用 <code>qtask push</code> 投递，或启动你的 Worker 后回来看这里。
@@ -116,10 +125,10 @@ export function QueuesPage() {
                   <span style={{ flex: 1 }} />
                   {c.abnormal && <StateBadge state="failed" label="异常" />}
                 </div>
-                <ProgressBar done={c.progress.completed1h ?? 0} remaining={c.progress.remaining} dlq={c.stats.dlq ?? 0} />
+                <ProgressBar done={c.progress.completedObserved ?? 0} remaining={c.progress.remaining} dlq={c.stats.dlq ?? 0} />
                 <div className="qc-stats num">
-                  剩余 {fmtInt(c.progress.remaining)} · 完成/1h {fmtInt(c.progress.completed1h)} · 速率 {fmtRate(c.progress.ratePerMin)} ·{" "}
-                  {c.progress.stalled ? <span style={{ color: "var(--c-danger)" }}>停滞 ⚠</span> : c.progress.etaText ?? "ETA —"}
+                  待处理 {fmtInt(c.progress.remaining)} · 观测期完成 {fmtInt(c.progress.completedObserved)} · 速率 {fmtRate(c.progress.ratePerMin)} ·{" "}
+                  {c.noWorker ? <span style={{ color: "var(--c-danger)" }}>无 Worker</span> : c.progress.stalled ? <span style={{ color: "var(--c-danger)" }}>疑似停滞 ⚠</span> : c.scheduledOnly ? "等待调度" : c.progress.etaText ?? "ETA —"}
                   {(c.stats.dlq ?? 0) > 0 && <span style={{ color: "var(--c-danger)" }}> · DLQ {c.stats.dlq}</span>}
                 </div>
                 <div className="qc-actions">
@@ -129,7 +138,7 @@ export function QueuesPage() {
                   <OpsMenu
                     label="操作"
                     items={[
-                      { label: "投递测试任务", onClick: () => setPushQueue(c.name) },
+                      { label: "投递任务…", onClick: () => setPushQueue(c.name) },
                       { label: "重放全部 DLQ", onClick: () => setConfirm({ kind: "requeueDlq", queue: c.name }) },
                       { label: "恢复失联 processing", onClick: () => setConfirm({ kind: "recover", queue: c.name }) },
                       { label: "drain 手动重试", onClick: () => setConfirm({ kind: "retry", queue: c.name }) },
@@ -149,7 +158,7 @@ export function QueuesPage() {
           queue={pushQueue}
           open
           onClose={() => setPushQueue(null)}
-          onPushed={() => setRefreshKey((k) => k + 1)}
+          onPushed={reload}
         />
       )}
       <ConfirmDialog

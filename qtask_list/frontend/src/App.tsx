@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet } from "react-router-dom";
 import { api } from "./api";
 import { AppDataProvider, useAppData } from "./appData";
 import { useTheme } from "./theme";
@@ -39,12 +39,9 @@ function SideNav() {
 }
 
 function TopBar() {
-  const { interval, setInterval, health, error } = useAppData();
+  const { interval, setInterval, health, error, reload, lastUpdated } = useAppData();
   const { theme, toggle } = useTheme();
   const [username, setUsername] = useState<string | null>(null);
-  const navigate = useNavigate();
-  const location = useLocation();
-  const nextRef = useRef(location.pathname + location.search);
 
   useEffect(() => {
     api
@@ -55,10 +52,10 @@ function TopBar() {
 
   const logout = async () => {
     await api.logout().catch(() => undefined);
-    navigate("/login");
+    window.location.assign("/login");
   };
 
-  const conn = error ? "bad" : health?.status === "ok" ? "ok" : "warn";
+  const conn = error || health?.status === "error" ? "bad" : health?.status === "ok" ? "ok" : "warn";
   return (
     <header className="topbar">
       <span title={conn === "ok" ? "Redis 连接正常" : conn === "warn" ? "等待数据" : `连接异常：${error ?? ""}`}>
@@ -75,7 +72,11 @@ function TopBar() {
         />
         {conn === "ok" ? "已连接" : conn === "warn" ? "等待…" : "连接异常"}
       </span>
+      {lastUpdated && <span className="faint num" title={new Date(lastUpdated).toLocaleString("zh-CN")}>
+        {error ? "数据已过时 · " : "更新于 "}{new Date(lastUpdated).toLocaleTimeString("zh-CN")}
+      </span>}
       <span className="spacer" />
+      <button className="btn sm" onClick={reload} title="立即刷新监控数据">刷新</button>
       <label className="faint" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
         自动刷新
         <select className="input" value={interval} onChange={(e) => setInterval(Number(e.target.value) as RefreshInterval)}>
@@ -96,7 +97,6 @@ function TopBar() {
           </button>
         </>
       )}
-      {nextRef.current.length < 0 && <span />}
     </header>
   );
 }

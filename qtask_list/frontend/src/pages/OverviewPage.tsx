@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAppData } from "../appData";
 import { RateSampler, fmtInt, fmtRate } from "../sampler";
@@ -8,23 +8,32 @@ type FilterKey = "all" | "active" | "abnormal";
 
 export function OverviewPage() {
   const navigate = useNavigate();
-  const { queues, alerts, error, loading } = useAppData();
+  const { queues, alerts, error, loading, reload } = useAppData();
   const samplerRef = useRef(new RateSampler());
+  const [sampleVersion, setSampleVersion] = useState(0);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  if (queues) samplerRef.current.observe(queues);
+  useEffect(() => {
+    if (queues) {
+      samplerRef.current.observe(queues);
+      setSampleVersion((value) => value + 1);
+    }
+  }, [queues]);
 
   const rows = useMemo(() => {
     if (!queues) return [];
     return queues.map((item) => {
       const stats = item as unknown as Record<string, number>;
       const progress = samplerRef.current.progress(String(item.name), stats);
+      const noWorker = (stats.queue ?? 0) > 0 && (stats.active_workers ?? 0) === 0;
+      const scheduledOnly = (stats.queue ?? 0) === 0 && (stats.processing ?? 0) === 0 &&
+        (stats.retry ?? 0) === 0 && (stats.delay ?? 0) > 0;
       const abnormal =
-        (stats.dlq ?? 0) > 0 || progress.stalled || (stats.stale_workers ?? 0) > 0 || (stats.deadline_missed ?? 0) > 0;
-      return { name: String(item.name), stats, progress, abnormal };
+        (stats.dlq ?? 0) > 0 || progress.stalled || noWorker || (stats.stale_workers ?? 0) > 0 || (stats.deadline_missed ?? 0) > 0;
+      return { name: String(item.name), stats, progress, abnormal, noWorker, scheduledOnly };
     });
-  }, [queues]);
+  }, [queues, sampleVersion]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, typeof rows>();
@@ -50,6 +59,7 @@ export function OverviewPage() {
   const activeCount = rows.filter((r) => r.progress.remaining > 0).length;
   const abnormalCount = rows.filter((r) => r.abnormal).length;
   const totalRate = rows.reduce((acc, r) => acc + (r.progress.ratePerMin ?? 0), 0);
+  const hasRateSample = rows.some((r) => r.progress.ratePerMin !== null);
 
   const visibleGroups = grouped
     .map(([ns, group]) => {
@@ -63,14 +73,16 @@ export function OverviewPage() {
   return (
     <div className="page">
       <h1 className="page-title">总览</h1>
-      <p className="page-desc">盯盘与巡检：每条队列完成多少、剩多少、预计多久、是否停滞。</p>
-      {error && <ErrorBanner error={error} onRetry={() => window.location.reload()} />}
+      <p className="page-desc">盯盘与巡检：当前待处理量、浏览器观测期完成量和估计速率。图形是观测参考比，不代表本轮批次完成率；延迟任务不参与 ETA。</p>
+      {error && <ErrorBanner error={error} onRetry={reload} />}
 
       {loading && !queues ? (
         <Skeleton lines={6} height={40} />
+      ) : !queues ? (
+        <EmptyState icon="⚠" title="监控数据不可用">连接恢复后点击顶栏“刷新”。</EmptyState>
       ) : queues && queues.length === 0 ? (
         <EmptyState icon="📭" title="还没有任何队列">
-          用 <code>qtask push</code> 或者在队列页投递第一条任务后，这里会出现进度总览。
+          用 <code>qtask push</code> 或者在队列页投递第一条任务后，这里会出现运行总览。
         </EmptyState>
       ) : (
         <>
@@ -90,15 +102,15 @@ export function OverviewPage() {
             />
             <KpiCard
               label="合计速率"
-              value={fmtRate(totalRate)}
-              hint="前端采样估算（条/min）"
-              title="口径：对 /api/queues 的周期采样差值；冷启动约 10s 内显示 —"
+              value={fmtRate(hasRateSample ? totalRate : null)}
+              hint="观测至少 30 秒后估算（条/min）"
+              title="浏览器采样估算；未采满 30 秒时显示 —"
             />
             <KpiCard
               label="异常队列"
               value={abnormalCount}
               danger={abnormalCount > 0}
-              hint="DLQ/停滞/失联/过期"
+              hint="DLQ/无 Worker/疑似停滞/失联/过期"
               onClick={() => setFilter("abnormal")}
               title="点击在本页只看异常队列"
             />
@@ -129,7 +141,7 @@ export function OverviewPage() {
           )}
 
           <div className="section-head">
-            <h2>队列进度矩阵</h2>
+            <h2>队列运行矩阵</h2>
             <div className="seg">
               {(
                 [
@@ -144,11 +156,15 @@ export function OverviewPage() {
               ))}
             </div>
           </div>
+          <div className="matrix-columns" aria-hidden="true">
+            <span>队列</span><span title="绿：观测期完成；蓝：待处理；红：DLQ">构成 ⓘ</span>
+            <span>待处理</span><span>观测完成</span><span>条/min</span><span>预计/状态</span><span>异常</span>
+          </div>
 
           {visibleGroups.map(([ns, group]) => {
             const isCollapsed = collapsed.has(ns);
             const gRemaining = group.reduce((a, r) => a + r.progress.remaining, 0);
-            const gDone = group.reduce((a, r) => a + (r.progress.completed1h ?? 0), 0);
+            const gDone = group.reduce((a, r) => a + (r.progress.completedObserved ?? 0), 0);
             const gAbn = group.filter((r) => r.abnormal).length;
             return (
               <div className="matrix-group" key={ns}>
@@ -167,7 +183,7 @@ export function OverviewPage() {
                   <span>{ns}</span>
                   <span className="muted">· {group.length} 个队列</span>
                   <span className="muted num">· 剩余 {fmtInt(gRemaining)}</span>
-                  <span className="muted num">· 完成/1h {fmtInt(gDone)}</span>
+                  <span className="muted num">· 观测期完成 {fmtInt(gDone)}</span>
                   {gAbn > 0 && <span className="badge c-danger">⚠ {gAbn}</span>}
                   {gRemaining === 0 && <span className="badge c-muted">空闲</span>}
                 </button>
@@ -180,25 +196,24 @@ export function OverviewPage() {
                     >
                       <span className="qname" title={r.name}>{r.name}</span>
                       <ProgressBar
-                        done={r.progress.completed1h ?? 0}
+                        done={r.progress.completedObserved ?? 0}
                         remaining={r.progress.remaining}
                         dlq={r.stats.dlq ?? 0}
                       />
-                      <span className="num">
-                        {r.progress.progressPct === null ? "—" : `${Math.round(r.progress.progressPct)}%`}
-                      </span>
                       <span className="num">{fmtInt(r.progress.remaining)}</span>
-                      <span className="num">{fmtInt(r.progress.completed1h)}</span>
+                      <span className="num">{fmtInt(r.progress.completedObserved)}</span>
                       <span className="num">{fmtRate(r.progress.ratePerMin)}</span>
                       <span className="num" style={{ color: r.progress.stalled ? "var(--c-danger)" : undefined }}>
-                        {r.progress.stalled ? "停滞 ⚠" : r.progress.etaText ?? "—"}
+                        {r.noWorker ? "无 Worker" : r.progress.stalled ? "疑似停滞 ⚠" : r.scheduledOnly ? "等待调度" : r.progress.etaText ?? "—"}
                       </span>
                       <span>
                         {(r.stats.dlq ?? 0) > 0 && <span className="badge c-danger">DLQ {r.stats.dlq}</span>}
                         {(r.stats.stale_workers ?? 0) > 0 && <span className="badge c-danger">失联 {r.stats.stale_workers}</span>}
                         {(r.stats.deadline_missed ?? 0) > 0 && <span className="badge c-warning">过期 {r.stats.deadline_missed}</span>}
+                        {r.noWorker && <span className="badge c-danger">无 Worker</span>}
                         {r.stats.observation_indexed === 0 && <span className="badge c-warning" title="旧队列需运行 rebuild-observation 回填监控索引">指标需回填</span>}
-                        {!r.abnormal && r.progress.remaining > 0 && <span className="badge c-primary">进行中</span>}
+                        {!r.abnormal && r.scheduledOnly && <span className="badge c-warning">等待调度</span>}
+                        {!r.abnormal && !r.scheduledOnly && r.progress.remaining > 0 && <span className="badge c-primary">进行中</span>}
                         {!r.abnormal && r.progress.remaining === 0 && <span className="badge c-success">空闲</span>}
                       </span>
                     </div>

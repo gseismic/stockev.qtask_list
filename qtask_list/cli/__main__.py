@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import ipaddress
 import json
 import os
 import threading
@@ -13,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 import redis
 import typer
-from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
@@ -94,6 +94,22 @@ def cli_task_row(item: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def queue_has_problem(stats: Dict[str, Any]) -> bool:
+    """按值班可行动的信号判断队列是否需要查看。"""
+    return any(int(stats.get(key, 0)) > 0 for key in ("dlq", "deadline_missed", "stale_workers")) or (
+        int(stats.get("queue", 0)) > 0 and int(stats.get("active_workers", 0)) == 0
+    )
+
+
+def is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def print_message_rows(rows: List[Dict[str, Any]], title: str):
     if not rows:
         console.print("[yellow]No tasks found[/yellow]")
@@ -166,15 +182,27 @@ def rebuild_observation(
 @app.command()
 def status(
     queue_name: Optional[str] = typer.Argument(None, help="队列名称，如 stockev:fetch"),
-    namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
+    namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="指定队列补前缀，或筛选全部队列"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
+    problems_only: bool = typer.Option(False, "--problems-only", help="仅列出需处理的队列（只用于全局状态）"),
+    json_output: bool = typer.Option(False, "--json", help="输出完整状态 JSON"),
 ):
     """查看队列状态"""
     admin = admin_from_url(redis_url)
 
     if queue_name:
+        if problems_only:
+            raise typer.BadParameter("--problems-only 仅用于不指定队列的全局状态")
         queue_name = normalize_queue_name(queue_name, namespace)
-        stats = admin.queue_stats(queue_name)
+        try:
+            stats = admin.queue_stats(queue_name)
+        except redis.RedisError as exc:
+            console.print(f"[red]Redis 不可用：{redis_endpoint_label(redis_url)}[/red]")
+            raise typer.Exit(1) from exc
+
+        if json_output:
+            console.print_json(json_dumps({"name": queue_name, **stats}))
+            return
 
         table = Table(title=f"Queue: {queue_name}")
         table.add_column("Status", style="cyan")
@@ -186,44 +214,55 @@ def status(
         console.print(table)
         return
 
-    queue_rows = admin.list_queues()
+    try:
+        queue_rows = admin.list_queues()
+    except redis.RedisError as exc:
+        console.print(f"[red]Redis 不可用：{redis_endpoint_label(redis_url)}[/red]")
+        raise typer.Exit(1) from exc
+    if namespace:
+        queue_rows = [row for row in queue_rows if str(row["name"]).startswith(f"{namespace}:")]
+    if problems_only:
+        queue_rows = [row for row in queue_rows if queue_has_problem(row)]
 
-    if not queue_rows:
-        console.print("[yellow]No queues found[/yellow]")
+    if json_output:
+        console.print_json(json_dumps(queue_rows))
         return
 
-    table = Table(title="All Queues")
-    table.add_column("Queue", style="cyan")
-    table.add_column("Ready", style="green", justify="right")
-    table.add_column("Processing", style="yellow", justify="right")
-    table.add_column("Retry", style="magenta", justify="right")
-    table.add_column("DLQ", style="red", justify="right")
-    table.add_column("Delay", style="blue", justify="right")
+    if not queue_rows:
+        console.print("[yellow]No matching queues found[/yellow]")
+        return
 
-    total = {"queue": 0, "processing": 0, "retry": 0, "dlq": 0, "delay": 0}
+    console.print("R=ready P=processing Rt=legacy retry Rw=retry_wait D=delay; Due=overdue; W=online/stale")
+    table = Table(title="All Queues", padding=(0, 1))
+    table.add_column("Queue", style="cyan", no_wrap=True)
+    table.add_column("R/P/Rt/Rw/D", justify="right", no_wrap=True)
+    table.add_column("DLQ", style="red", justify="right")
+    table.add_column("Due", style="red", justify="right")
+    table.add_column("W", justify="right")
+
+    total = {
+        "queue": 0, "processing": 0, "retry": 0, "retry_wait": 0,
+        "dlq": 0, "delay": 0, "deadline_missed": 0,
+        "active_workers": 0, "stale_workers": 0,
+    }
 
     for stats in queue_rows:
-        try:
-            table.add_row(
-                str(stats["name"]),
-                str(stats["queue"]),
-                str(stats["processing"]),
-                str(stats["retry"]),
-                str(stats["dlq"]),
-                str(stats["delay"]),
-            )
-            for k in total:
-                total[k] += stats[k]
-        except Exception as e:
-            logger.error(f"Error getting stats for {stats.get('name', '')}: {e}")
+        table.add_row(
+            str(stats["name"]),
+            f"{stats['queue']}/{stats['processing']}/{stats['retry']}/{stats['retry_wait']}/{stats['delay']}",
+            str(stats["dlq"]),
+            str(stats["deadline_missed"]),
+            f"{stats['active_workers']}/{stats['stale_workers']}",
+        )
+        for k in total:
+            total[k] += stats[k]
 
     table.add_row(
         "[bold]Total[/bold]",
-        f"[bold]{total['queue']}[/bold]",
-        f"[bold]{total['processing']}[/bold]",
-        f"[bold]{total['retry']}[/bold]",
+        f"[bold]{total['queue']}/{total['processing']}/{total['retry']}/{total['retry_wait']}/{total['delay']}[/bold]",
         f"[bold]{total['dlq']}[/bold]",
-        f"[bold]{total['delay']}[/bold]",
+        f"[bold]{total['deadline_missed']}[/bold]",
+        f"[bold]{total['active_workers']}/{total['stale_workers']}[/bold]",
     )
 
     console.print(table)
@@ -515,7 +554,7 @@ def history(
 def watch(
     queue_name: str = typer.Argument(..., help="队列名称"),
     namespace: Optional[str] = typer.Option(None, "--namespace", "-n", help="命名空间"),
-    interval: int = typer.Option(2, "--interval", "-i", help="刷新间隔(秒)"),
+    interval: int = typer.Option(2, "--interval", "-i", min=1, help="刷新间隔(秒)，至少 1 秒"),
     redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
 ):
     """实时监控队列"""
@@ -532,52 +571,36 @@ def watch(
             console.print(f"  Queue:        {stats['queue']}")
             console.print(f"  Processing:  {stats['processing']}")
             console.print(f"  Retry:        {stats['retry']}")
+            console.print(f"  Retry wait:   {stats['retry_wait']}")
             console.print(f"  DLQ:          {stats['dlq']}")
             console.print(f"  Delay:        {stats['delay']}")
+            console.print(f"  Overdue:      {stats['deadline_missed']}")
+            console.print(f"  Workers:      {stats['active_workers']} online / {stats['stale_workers']} stale")
             time.sleep(interval)
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopped[/yellow]")
+    except redis.RedisError as exc:
+        console.print(f"[red]Redis 不可用：{redis_endpoint_label(redis_url)}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command()
 def worker(
-    module: Optional[str] = typer.Option(
-        None,
+    module: str = typer.Option(
+        ...,
         "--module",
         "-m",
         help="导入一个 qtask_list.Worker 实例，如 myapp.workers:worker",
     ),
-    queue: Optional[str] = typer.Option(None, "--queue", "-q", help="队列名称"),
-    namespace: str = typer.Option("stockev", "--namespace", "-n", help="命名空间"),
-    workers: int = typer.Option(1, "--workers", "-w", help="并发 worker 数"),
-    result_queue: Optional[str] = typer.Option(None, "--result-queue", "-r", help="结果队列"),
-    redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
 ):
     """启动用户代码中注册好 handler 的 Worker"""
     if not QTASK_LIST_AVAILABLE:
         console.print("[red]Error: qtask_list not installed. Run: pip install qtask_list[/red]")
         raise typer.Exit(1)
 
-    if module:
-        loaded_worker = load_worker_from_module(module)
-        console.print(f"[green]Starting worker from {module}[/green]")
-        loaded_worker.run()
-        return
-
-    if not queue:
-        console.print("[red]Error: --module is required, or pass --queue for legacy validation[/red]")
-        raise typer.Exit(1)
-
-    console.print(
-        "[red]Error: the generic CLI worker has no registered handlers. "
-        "Create a Worker in your app and run: qtask worker --module myapp.workers:worker[/red]"
-    )
-    console.print(
-        f"[yellow]Requested queue {namespace}:{queue} with {workers} workers was not started.[/yellow]"
-    )
-    if result_queue or redis_url:
-        logger.debug("Legacy worker options were ignored because no handler module was provided")
-    raise typer.Exit(1)
+    loaded_worker = load_worker_from_module(module)
+    console.print(f"[green]Starting worker from {module}[/green]")
+    loaded_worker.run()
 
 
 @app.command()
@@ -659,6 +682,9 @@ def dashboard(
     password: Optional[str] = typer.Option(None, "--password", help="Dashboard 登录密码，设置后启用登录"),
     session_ttl: int = typer.Option(86400, "--session-ttl", help="登录会话有效期，秒"),
     secure_cookie: bool = typer.Option(False, "--secure-cookie", help="HTTPS 部署时启用 Secure Cookie"),
+    allow_unauthenticated: bool = typer.Option(
+        False, "--allow-unauthenticated", help="显式允许无认证的远程访问（危险）"
+    ),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="启动后打开浏览器"),
 ):
     """启动 Dashboard 面板"""
@@ -671,14 +697,24 @@ def dashboard(
     if secure_cookie:
         os.environ["QTASK_DASHBOARD_SECURE_COOKIE"] = "1"
 
-    if not QTASK_LIST_AVAILABLE:
-        console.print("[red]Error: fastapi/uvicorn not installed. Run: pip install qtask_list[dashboard][/red]")
-        raise typer.Exit(1)
-
     display_host = "localhost" if host in {"0.0.0.0", "::", "127.0.0.1"} else host
     auth_enabled = bool(os.environ.get("QTASK_DASHBOARD_PASSWORD")) or (
         os.environ.get("QTASK_DASHBOARD_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
     )
+    if not is_loopback_host(host) and not auth_enabled and not allow_unauthenticated:
+        console.print(
+            "[red]拒绝无认证的远程 Dashboard：设置 --password / QTASK_DASHBOARD_PASSWORD，"
+            "或显式传 --allow-unauthenticated[/red]"
+        )
+        raise typer.Exit(2)
+
+    try:
+        import uvicorn
+        from qtask_list.dashboard.main import app
+    except ImportError as exc:
+        console.print("[red]缺少 Dashboard 依赖；请安装 pip install 'qtask_list[dashboard]'[/red]")
+        raise typer.Exit(1) from exc
+
     console.print(f"[green]Starting Dashboard on http://{display_host}:{port}[/green]")
     console.print(f"[cyan]Redis: {redis_endpoint_label(redis_url)}[/cyan]")
     console.print(f"[cyan]Auth: {'enabled' if auth_enabled else 'disabled'}[/cyan]")
@@ -691,9 +727,6 @@ def dashboard(
             webbrowser.open(f"http://{display_host}:{port}")
 
         threading.Thread(target=open_browser_delayed, daemon=True).start()
-
-    import uvicorn
-    from qtask_list.dashboard.main import app
 
     uvicorn.run(app, host=host, port=port, log_level="info")
 

@@ -597,6 +597,24 @@ def test_dashboard_requeue_expired_ready_task_does_not_duplicate_or_lose_payload
     assert r.hget(f"qtask:task:{task_id}", "outcome") == "cancelled"
 
 
+def test_dashboard_requeue_expired_rejects_past_new_deadline_without_cancelling(client, r):
+    """无效的新截止时间不能取消仍待处理的旧任务。"""
+    queue = "qtask_dash_test:expired:past-deadline"
+    task_id = seed_expired_tasks(r, queue, 1, "exp-past")[0]
+    past_deadline = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    response = client.post(
+        f"/api/queue/{queue}/requeue-expired",
+        json={"task_id": task_id, "start_deadline_at": past_deadline},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == 0
+    assert "必须晚于当前时间" in response.json()["note"]
+    assert r.llen(queue) == 1
+    assert r.hget(f"qtask:task:{task_id}", "outcome") != "cancelled"
+
+
 def test_dashboard_requeue_expired_without_payload_does_not_rebuild_lossy_task(client, r):
     """历史记录缺完整 payload 时不能仅凭 action 重建任务。"""
     queue = "qtask_dash_test:expired:no-payload"
@@ -689,6 +707,50 @@ def test_global_search_cursor_keeps_initial_queue_snapshot(client, r):
     assert page2.status_code == 200
     assert page2.json()["tasks"][0]["task_id"] in first_ids
     assert page2.json()["tasks"][0]["_queue"] == first_queue.base
+
+
+def test_global_search_filters_action_and_created_time(client, r):
+    # 跨队列搜索在大量历史中应可用 action 与时间共同缩小范围，且游标绑定筛选条件。
+    queue = SmartQueue("redis://localhost:6379/0", "global-filter", namespace="qtask_dash_test", redis_client=r)
+    old = queue.enqueue(TaskSpec(action="target_for_filter", payload={"batch": "old"})).task_id
+    current = queue.enqueue(TaskSpec(action="target_for_filter", payload={"batch": "new"})).task_id
+    queue.enqueue(TaskSpec(action="other_for_filter", payload={"batch": "new"}))
+    cutoff = time.time() - 60
+    r.hset(f"qtask:task:{old}", "created_at", str(cutoff - 3600))
+    r.zadd(f"qtask:hist:{queue.base}", {old: cutoff - 3600})
+
+    response = client.get("/api/tasks", params={
+        "action": "target_for_filter", "created_after": cutoff, "limit": 1,
+    })
+    assert response.status_code == 200
+    assert [row["task_id"] for row in response.json()["tasks"]] == [current]
+    cursor = response.json()["next_cursor"]
+    if cursor:
+        changed = client.get("/api/tasks", params={
+            "action": "target_for_filter", "created_after": cutoff - 1,
+            "limit": 1, "cursor": cursor,
+        })
+        assert changed.status_code == 400
+
+
+def test_filtered_operational_views_preserve_actionable_display_state(client, r):
+    # 过期与等待重试是派生视图，表格行必须传递展示状态给任务抽屉。
+    expired_queue = "qtask_dash_test:display-expired"
+    seed_expired_tasks(r, expired_queue, 1, "display-expired")
+    expired = client.get(f"/api/queue/{expired_queue}/tasks", params={"state": "deadline_missed"})
+    assert expired.status_code == 200
+    assert expired.json()["tasks"][0]["_state"] == "deadline_missed"
+
+    retry_queue = SmartQueue(
+        "redis://localhost:6379/0", "display-retry", namespace="qtask_dash_test", redis_client=r
+    )
+    retry_queue.push({"action": "retry_action"})
+    item = retry_queue.pop_no_wait()
+    assert item is not None
+    retry_queue.fail(item[1], "temporary failure")
+    waiting = client.get(f"/api/queue/{retry_queue.base}/tasks", params={"state": "retry_wait"})
+    assert waiting.status_code == 200
+    assert waiting.json()["tasks"][0]["_state"] == "retry_wait"
 
 
 def test_search_rejects_malformed_cursor_as_client_error(client, r):

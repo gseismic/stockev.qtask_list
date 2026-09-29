@@ -88,8 +88,8 @@ export function GuidePage() {
           <StateBadge state="failed" label="failed 失败" />
           <StateBadge state="skipped" label="skipped 跳过" />
           <StateBadge state="cancelled" label="cancelled 取消" />
-          <StateBadge state="deadline_missed" label="deadline_missed 过期" />
         </div>
+        <p className="faint"><StateBadge state="deadline_missed" label="deadline_missed 过期" /> 是待处理任务的过期视图，不是终态。更新截止时间后可以重放为新任务。</p>
       </Section>
 
       <Section id="numbers" title="关键数字怎么读">

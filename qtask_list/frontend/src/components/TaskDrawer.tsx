@@ -54,6 +54,7 @@ export function TaskDrawer({
 
   const queue = String(task?._queue ?? task?.queue ?? "");
   const state = hint || String(task?._state ?? task?.state ?? task?.outcome ?? "");
+  const isOverdue = state === "deadline_missed" || state === "expired";
   const isTerminal = TERMINAL.has(state) || state === "dlq" || state === "history";
 
   const loadPayload = async () => {
@@ -68,12 +69,17 @@ export function TaskDrawer({
     }
   };
 
-  const runAction = async (fn: () => Promise<unknown>) => {
+  const runAction = async (fn: () => Promise<unknown>, closeAfter = false) => {
     setBusy(true);
     setActionError(null);
     try {
       await fn();
       setConfirm(null);
+      if (closeAfter) {
+        onChanged();
+        onClose();
+        return;
+      }
       setHint(undefined);
       await load();
       onChanged();
@@ -168,7 +174,7 @@ export function TaskDrawer({
             {actionError && <div className="error-banner">⚠ {actionError}</div>}
 
             <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-              {(state === "deadline_missed" || state === "expired") && (
+              {isOverdue && (
                 <input
                   type="datetime-local"
                   className="input"
@@ -180,6 +186,11 @@ export function TaskDrawer({
               {isTerminal && (
                 <button className="btn primary" onClick={() => setConfirm("replay")} disabled={busy}>
                   重放为新任务
+                </button>
+              )}
+              {isOverdue && (
+                <button className="btn primary" onClick={() => setConfirm("replay")} disabled={busy || !deadlineInput}>
+                  更新截止并重放
                 </button>
               )}
               {state === "dlq" && (
@@ -198,24 +209,25 @@ export function TaskDrawer({
 
         <ConfirmDialog
           open={confirm === "replay"}
-          title="重放为新任务"
+          title={isOverdue ? "更新截止并重放" : "重放为新任务"}
           body={
             <div>
-              <p>将以当前 payload 重放并生成新任务（保留血缘）。{state === "deadline_missed" && deadlineInput && `新截止时间：${deadlineInput.replace("T", " ")}`}</p>
+              <p>将以当前 payload 生成新任务（保留血缘）。{isOverdue && deadlineInput && `新截止时间：${deadlineInput.replace("T", " ")}`}</p>
             </div>
           }
           confirmText="重放"
           busy={busy}
           onCancel={() => setConfirm(null)}
-          onConfirm={() =>
-            runAction(() =>
-              api.replayTask(taskId, {
-                queue: queue || undefined,
-                start_deadline_at:
-                  state === "deadline_missed" && deadlineInput ? new Date(deadlineInput).toISOString() : undefined,
-              }),
-            )
-          }
+          onConfirm={() => runAction(async () => {
+            if (isOverdue) {
+              if (!deadlineInput || !queue) throw new Error("请选择新的执行截止时间，并确认任务所属队列");
+              const result = await api.requeueExpired(queue, new Date(deadlineInput).toISOString(), taskId);
+              if (result.moved !== 1) throw new Error(result.note ?? "任务未被重放，请刷新后核对状态");
+              return;
+            }
+            const result = await api.replayTask(taskId, { queue: queue || undefined });
+            if (!result.accepted) throw new Error(result.reason ?? "重放未被接受");
+          })}
         />
         <ConfirmDialog
           open={confirm === "requeue"}
@@ -234,7 +246,7 @@ export function TaskDrawer({
           confirmText="删除"
           busy={busy}
           onCancel={() => setConfirm(null)}
-          onConfirm={() => runAction(() => api.deleteTask(taskId, queue))}
+          onConfirm={() => runAction(() => api.deleteTask(taskId, queue), true)}
         />
       </div>
     </div>
@@ -254,17 +266,16 @@ function ErrorDrawer({ onRetry }: { onRetry: () => void }) {
 
 function Timeline({ task, state }: { task: TaskRow; state: string }) {
   const events: Array<{ time: string; label: string; color: string; note?: string }> = [];
-  const c = (v: string) => v;
   events.push({
     time: fmtTime(task.created_at as number),
     label: "投递",
     color: "var(--c-primary)",
     note: task.logical_key ? `logical_key=${task.logical_key}` : undefined,
   });
-  if ((task.attempt ?? 0) > 0) {
+  if (task.last_started_at || task.started_at) {
     events.push({
-      time: fmtTime(task.updated_at as number),
-      label: `开始执行 attempt=${task.attempt}`,
+      time: fmtTime(task.last_started_at ?? task.started_at),
+      label: `最近一次开始执行 attempt=${task.attempt ?? "—"}`,
       color: "var(--c-primary)",
       note: task.worker ? `worker=${task.worker}` : undefined,
     });
@@ -276,15 +287,22 @@ function Timeline({ task, state }: { task: TaskRow; state: string }) {
     events.push({ time: task.run_at_text ? String(task.run_at_text) : fmtTime(task.run_at), label: "计划延迟执行", color: "var(--c-warning)" });
   }
   const outcomeColor: Record<string, string> = {
-    completed: c("var(--c-success)"),
-    failed: c("var(--c-danger)"),
-    dlq: c("var(--c-danger)"),
+    completed: "var(--c-success)",
+    failed: "var(--c-danger)",
+    dlq: "var(--c-danger)",
   };
-  if (TERMINAL.has(state) || state === "dlq") {
+  if ((TERMINAL.has(state) || state === "dlq") && task.finished_at) {
     events.push({
-      time: fmtTime(task.updated_at as number),
+      time: fmtTime(task.finished_at),
       label: STATE_LABELS[state as StateKey] ?? state,
       color: outcomeColor[state] ?? "var(--c-muted)",
+      note: task.error ? String(task.error) : undefined,
+    });
+  } else if (task.updated_at) {
+    events.push({
+      time: fmtTime(task.updated_at),
+      label: "记录更新时间",
+      color: "var(--c-muted)",
       note: task.error ? String(task.error) : undefined,
     });
   }

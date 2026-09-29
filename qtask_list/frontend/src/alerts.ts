@@ -13,7 +13,8 @@ export interface AlertItem {
 
 export const ALERT_RULES_DOC = [
   { name: "DLQ 堆积", rule: "dlq>0", severity: "danger", source: "queue_stats.dlq", note: "有任务重试耗尽进入死信，需人工处理" },
-  { name: "失败率偏高", rule: "failed/(failed+completed) > 5%", severity: "warning", source: "queue_stats（累计口径，近似设计稿“最近50条”）", note: "持续偏高说明任务或依赖异常" },
+  { name: "无人消费", rule: "ready>0 且 active_workers=0", severity: "danger", source: "queue_stats.queue/active_workers", note: "ready 有任务，但没有在线 Worker；纯延迟队列不触发" },
+  { name: "失败率偏高", rule: "failed/(failed+completed) > 5%", severity: "warning", source: "queue_stats 累计计数", note: "历史累计口径；旧故障恢复后仍可能持续显示" },
   { name: "Stale Worker", rule: "stale_workers>0", severity: "danger", source: "queue_stats.stale_workers", note: "Worker 失联但 processing 还有任务，可恢复" },
   { name: "ready 积压", rule: "ready>10000 持续 10min", severity: "warning", source: "queue_stats.queue", note: "消费能力不足或 Worker 未启动" },
   { name: "任务过期", rule: "deadline_missed>0", severity: "warning", source: "queue_stats.deadline_missed", note: "任务超过执行截止时间，可改截止时间重放" },
@@ -73,6 +74,17 @@ export class AlertEngine {
           target: name,
           detail: `死信队列有 ${stats.dlq} 条任务等待处理`,
           locate: { page: "queue", queue: name, state: "dlq" },
+        });
+      }
+      if ((stats.queue ?? 0) > 0 && (stats.active_workers ?? 0) === 0) {
+        this.fire(`noworker:${name}`, {
+          key: `noworker:${name}`,
+          rule: "noworker",
+          ruleLabel: "无人消费",
+          severity: "danger",
+          target: name,
+          detail: `ready 有 ${stats.queue} 条任务，但没有在线 Worker`,
+          locate: { page: "queue", queue: name, state: "ready" },
         });
       }
       const done = (stats.completed_total ?? 0) + (stats.failed_total ?? 0);
@@ -184,6 +196,7 @@ export class AlertEngine {
       const stats = item as unknown as Record<string, number>;
       const name = String(item.name);
       if ((stats.dlq ?? 0) > 0) validKeys.add(`dlq:${name}`);
+      if ((stats.queue ?? 0) > 0 && (stats.active_workers ?? 0) === 0) validKeys.add(`noworker:${name}`);
       const done = (stats.completed_total ?? 0) + (stats.failed_total ?? 0);
       if (done >= 20 && (stats.failed_total ?? 0) / done > FAILED_RATIO) validKeys.add(`failedratio:${name}`);
       if ((stats.stale_workers ?? 0) > 0) validKeys.add(`stale:${name}`);

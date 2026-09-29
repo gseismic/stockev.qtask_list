@@ -414,7 +414,11 @@ class QueueAdmin:
             ):
                 continue
             record["_queue"] = names[index]
-            record["_state"] = row_state
+            record["_state"] = (
+                QueueState.deadline_missed.value
+                if selected in {QueueState.expired, QueueState.deadline_missed}
+                else QueueState.retry_wait.value if selected == QueueState.retry_wait else row_state
+            )
             record["_source"] = f"qtask:hist:{names[index]}"
             if needle and needle not in json.dumps(record, ensure_ascii=False, default=str).lower():
                 continue
@@ -1387,6 +1391,11 @@ class QueueAdmin:
             return {
                 "moved": 0,
                 "note": "deadline_missed replay 必须显式提供新的 start_deadline_at",
+            }
+        if deadline.timestamp() <= self.clock.now():
+            return {
+                "moved": 0,
+                "note": "新的 start_deadline_at 必须晚于当前时间，旧任务未被修改",
             }
         if task_id:
             return self._requeue_single_expired(queue_name, task_id, deadline)

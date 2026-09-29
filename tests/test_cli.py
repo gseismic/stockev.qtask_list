@@ -34,6 +34,14 @@ def cleanup_test_keys(client):
                 client.delete(f"qtask:task:{task_id}")
         finally:
             client.delete(hist_key)
+    for pattern in ("qtask:deadline:stockev_list:*", "qtask:metrics:stockev_list:*",
+                    "qtask:workers:stockev_list:*", "qtask:deadline:testns:*",
+                    "qtask:metrics:testns:*", "qtask:workers:testns:*"):
+        for key in client.scan_iter(pattern):
+            client.delete(key)
+    for queue in client.zrange("qtask:queues", 0, -1):
+        if queue.startswith(("stockev_list:", "testns:")):
+            client.zrem("qtask:queues", queue)
     for task_id in ["abc123", "clean1", "test1"]:
         client.delete(f"qtask:task:{task_id}")
     for key in client.scan_iter("stockev_list:*"):
@@ -64,6 +72,37 @@ class TestCLI:
         result = runner.invoke(app, ["status", "specific", "-n", "stockev_list"])
         assert result.exit_code == 0
         assert "stockev_list:specific" in result.stdout
+
+    def test_status_namespace_problem_filter_and_json(self, runner, r):
+        # 值班脚本应只接收目标 namespace 的可行动异常，JSON 不混入表格文本。
+        r.lpush("stockev_list:status_bad", make_msg("status-bad"))
+        r.lpush("stockev_list:status_ok", make_msg("status-ok"))
+        r.set("stockev_list:status_ok:worker:live", str(time.time()), ex=120)
+        r.lpush("testns:status_other", make_msg("status-other"))
+
+        result = runner.invoke(app, ["status", "--namespace", "stockev_list", "--problems-only", "--json"])
+        assert result.exit_code == 0
+        rows = json.loads(result.stdout)
+        assert [row["name"] for row in rows] == ["stockev_list:status_bad"]
+        assert rows[0]["queue"] == 1
+
+        all_rows = runner.invoke(app, ["status", "--namespace", "stockev_list", "--json"])
+        assert {row["name"] for row in json.loads(all_rows.stdout)} == {
+            "stockev_list:status_bad", "stockev_list:status_ok"
+        }
+
+    def test_status_table_and_single_json_include_operational_fields(self, runner, r):
+        # 人工巡检应直接看到重试等待、过期和 Worker 数，单队列 JSON 供脚本复用。
+        queue = "stockev_list:status_fields"
+        r.lpush(queue, make_msg("status-fields"))
+        r.zadd(f"qtask:deadline:{queue}", {"status-fields": time.time() - 10})
+        table = runner.invoke(app, ["status"])
+        assert table.exit_code == 0
+        assert "Rw=retry_wait" in table.stdout
+        assert "Due=overdue" in table.stdout
+        assert "W=online/stale" in table.stdout
+        single = runner.invoke(app, ["status", queue, "--json"])
+        assert json.loads(single.stdout)["deadline_missed"] == 1
 
     def test_push_and_peek_ready_task(self, runner, r):
         result = runner.invoke(
@@ -297,6 +336,11 @@ class TestCLIWatch:
         assert result.exit_code == 0
         assert "Watching" in result.stdout
 
+    def test_watch_rejects_zero_interval(self, runner):
+        # 零间隔会形成 Redis 忙轮询，CLI 参数校验应在连接前阻止。
+        result = runner.invoke(app, ["watch", "stockev_list:watch_test", "-i", "0"])
+        assert result.exit_code != 0
+
 
 class TestCLIWorker:
     def test_worker_missing_qtask_list(self, runner, r, monkeypatch):
@@ -304,15 +348,28 @@ class TestCLIWorker:
 
         monkeypatch.setattr(cli_module, "QTASK_LIST_AVAILABLE", False)
 
-        result = runner.invoke(app, ["worker", "-q", "test", "-n", "testns"])
+        result = runner.invoke(app, ["worker", "--module", "unused:worker"])
         assert result.exit_code != 0
         assert "not installed" in result.stdout or "Error" in result.stdout
 
-    def test_worker_without_module_does_not_start_generic_worker(self, runner, r):
-        result = runner.invoke(app, ["worker", "-q", "test", "-n", "testns"])
+    def test_worker_requires_module_and_rejects_unused_options(self, runner):
+        # 旧参数不会配置业务 Worker，必须从帮助和调用入口移除以免误用。
+        result = runner.invoke(app, ["worker"])
 
         assert result.exit_code != 0
-        assert "no registered handlers" in result.stdout
+        assert "--module" in result.stdout
+        old_option = runner.invoke(app, ["worker", "--module", "unused:worker", "--queue", "x"])
+        assert old_option.exit_code != 0
+        assert "--queue" in old_option.stdout
+
+
+def test_dashboard_rejects_remote_bind_without_auth(runner, monkeypatch):
+    # 管理后台含写操作，绑定非本地网卡时默认必须有认证配置。
+    monkeypatch.delenv("QTASK_DASHBOARD_PASSWORD", raising=False)
+    monkeypatch.delenv("QTASK_DASHBOARD_AUTH", raising=False)
+    result = runner.invoke(app, ["dashboard", "--host", "0.0.0.0", "--no-open"])
+    assert result.exit_code == 2
+    assert "--allow-unauthenticated" in result.stdout
 
 
 class TestCLICleanHistory:

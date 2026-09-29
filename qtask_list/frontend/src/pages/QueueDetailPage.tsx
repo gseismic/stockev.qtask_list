@@ -7,6 +7,7 @@ import { ConfirmDialog, ErrorBanner, OpsMenu, StateBadge } from "../components/u
 import { TaskFilterBar, TaskTable, type TaskFilters } from "../components/TaskTable";
 import { PushTaskDialog } from "../components/PushTaskDialog";
 import { TaskDrawer } from "../components/TaskDrawer";
+import { useAppData } from "../appData";
 
 const EMPTY_HINTS: Partial<Record<StateKey, string>> = {
   dlq: "dlq 队列是空的——任务重试耗尽才会进入这里。",
@@ -16,6 +17,7 @@ const EMPTY_HINTS: Partial<Record<StateKey, string>> = {
 };
 
 export function QueueDetailPage() {
+  const { reload } = useAppData();
   const { name = "" } = useParams();
   const queueName = decodeURIComponent(name);
   const [params, setParams] = useSearchParams();
@@ -87,6 +89,7 @@ export function QueueDetailPage() {
       await fn();
       setConfirm(null);
       setReloadKey((k) => k + 1);
+      reload();
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -131,12 +134,10 @@ export function QueueDetailPage() {
       {opError && <ErrorBanner error={opError} onRetry={() => setOpError(null)} />}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-        <button className="btn primary" onClick={() => setPushOpen(true)}>
-          投递测试任务
-        </button>
         <OpsMenu
           label="操作"
           items={[
+            { label: "投递任务…", onClick: () => setPushOpen(true) },
             { label: "drain 手动重试（retry → ready）", onClick: () => setConfirm("retry") },
             { label: "重放全部 DLQ", onClick: () => setConfirm("requeueDlq") },
             { label: "恢复失联 processing", onClick: () => setConfirm("recover") },
@@ -242,7 +243,7 @@ export function QueueDetailPage() {
       )}
 
       {pushOpen && (
-        <PushTaskDialog queue={queueName} open onClose={() => setPushOpen(false)} onPushed={() => setReloadKey((k) => k + 1)} />
+        <PushTaskDialog queue={queueName} open onClose={() => setPushOpen(false)} onPushed={() => { setReloadKey((k) => k + 1); reload(); }} />
       )}
 
       {openTask?.task_id && (
@@ -250,7 +251,7 @@ export function QueueDetailPage() {
           taskId={openTask.task_id}
           stateHint={String(openTask._state ?? openTask.state ?? "")}
           onClose={() => setOpenTask(null)}
-          onChanged={() => setReloadKey((k) => k + 1)}
+          onChanged={() => { setReloadKey((k) => k + 1); reload(); }}
         />
       )}
 

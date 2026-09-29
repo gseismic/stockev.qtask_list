@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAppData } from "../appData";
 import type { TaskRow } from "../types";
 import { STATE_KEYS, STATE_LABELS, type StateKey } from "../types";
 import { ErrorBanner, Skeleton } from "../components/ui";
-import { TaskFilterBar, TaskTable, type TaskFilters } from "../components/TaskTable";
+import { TaskFilterBar, TaskTable, toUnix, type TaskFilters } from "../components/TaskTable";
 import { TaskDrawer } from "../components/TaskDrawer";
 
 export function TasksPage() {
-  const { queues } = useAppData();
+  const { queues, reload } = useAppData();
   const [params, setParams] = useSearchParams();
   const stateParam = (params.get("state") as StateKey) || "all";
   const queueParam = params.get("queue") || "";
@@ -27,10 +27,24 @@ export function TasksPage() {
   const [limit, setLimit] = useState(50);
   const [reloadKey, setReloadKey] = useState(0);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [searchInput, setSearchInput] = useState(searchParam);
+  const [actionInput, setActionInput] = useState("");
+  const [action, setAction] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [openTask, setOpenTask] = useState<TaskRow | null>(null);
   const [exactError, setExactError] = useState<string | null>(null);
 
   const queueNames = useMemo(() => (queues ?? []).map((q) => String(q.name)), [queues]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setFilters((f) => ({ ...f, search: searchInput })), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setAction(actionInput.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [actionInput]);
 
   useEffect(() => {
     const next = new URLSearchParams();
@@ -91,7 +105,7 @@ export function TasksPage() {
           state={filters.state}
           onStateChange={(s) => setFilters((f) => ({ ...f, state: s }))}
           search={filters.search}
-          onSearchChange={(s) => setFilters((f) => ({ ...f, search: s }))}
+          onSearchChange={(s) => { setSearchInput(s); setFilters((f) => ({ ...f, search: s })); }}
           timeRange={{
             createdStart: filters.createdAfter ?? "",
             createdEnd: filters.createdBefore ?? "",
@@ -108,8 +122,8 @@ export function TasksPage() {
             className="input"
             style={{ width: 260 }}
             placeholder="搜索 task_id / action / payload"
-            value={filters.search}
-            onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
           <select
             className="input"
@@ -122,6 +136,19 @@ export function TasksPage() {
               </option>
             ))}
           </select>
+          <button className="btn" onClick={() => setShowAdvanced((v) => !v)} aria-expanded={showAdvanced}>
+            {showAdvanced ? "收起高级筛选" : "高级筛选"}
+          </button>
+        </div>
+      )}
+
+      {!queueSel && showAdvanced && (
+        <div className="filter-bar" aria-label="高级筛选">
+          <label>精确 action <input className="input" value={actionInput} onChange={(e) => setActionInput(e.target.value)} placeholder="例如 fetch_stock" /></label>
+          <label>发布起 <input className="input" type="datetime-local" value={filters.createdAfter ?? ""} onChange={(e) => setFilters((f) => ({ ...f, createdAfter: e.target.value }))} /></label>
+          <label>发布止 <input className="input" type="datetime-local" value={filters.createdBefore ?? ""} onChange={(e) => setFilters((f) => ({ ...f, createdBefore: e.target.value }))} /></label>
+          <label>完成起 <input className="input" type="datetime-local" value={filters.completedAfter ?? ""} onChange={(e) => setFilters((f) => ({ ...f, completedAfter: e.target.value }))} /></label>
+          <label>完成止 <input className="input" type="datetime-local" value={filters.completedBefore ?? ""} onChange={(e) => setFilters((f) => ({ ...f, completedBefore: e.target.value }))} /></label>
         </div>
       )}
 
@@ -138,6 +165,7 @@ export function TasksPage() {
       ) : (
         <GlobalTaskTable
           filters={filters}
+          action={action}
           limit={limit}
           onOpenTask={(t) => t.task_id && setOpenTask(t)}
           reloadKey={reloadKey}
@@ -149,7 +177,7 @@ export function TasksPage() {
           taskId={String(openTask.task_id)}
           stateHint={String(openTask._state ?? openTask.state ?? "")}
           onClose={() => setOpenTask(null)}
-          onChanged={() => setReloadKey((k) => k + 1)}
+          onChanged={() => { setReloadKey((k) => k + 1); reload(); }}
         />
       )}
     </div>
@@ -158,11 +186,13 @@ export function TasksPage() {
 
 function GlobalTaskTable({
   filters,
+  action,
   limit,
   onOpenTask,
   reloadKey,
 }: {
   filters: TaskFilters;
+  action: string;
   limit: number;
   onOpenTask: (t: TaskRow) => void;
   reloadKey: number;
@@ -174,63 +204,72 @@ function GlobalTaskTable({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [scanLimited, setScanLimited] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  const requestSeq = useRef(0);
 
-  const queryFor = (cursor?: string) => {
-    const query = new URLSearchParams({
-      status: filters.state === "all" ? "" : filters.state,
-      search: filters.search,
-      limit: String(limit),
-    });
-    if (!query.get("status")) query.delete("status");
-    if (cursor) query.set("cursor", cursor);
-    return query;
-  };
+  const queryFor = (cursor?: string) => ({
+    state: filters.state,
+    action: action.trim() || undefined,
+    search: filters.search.trim() || undefined,
+    limit,
+    cursor,
+    createdAfter: toUnix(filters.createdAfter ?? ""),
+    createdBefore: toUnix(filters.createdBefore ?? ""),
+    completedAfter: toUnix(filters.completedAfter ?? ""),
+    completedBefore: toUnix(filters.completedBefore ?? ""),
+  });
 
   useEffect(() => {
     let stopped = false;
+    const seq = ++requestSeq.current;
     const load = async () => {
       try {
-        const data = await fetch(`/api/tasks?${queryFor().toString()}`).then((r) => r.json());
-        if (stopped) return;
-        if (data.detail) throw new Error(String(data.detail));
+        const data = await api.tasks(queryFor());
+        if (stopped || seq !== requestSeq.current) return;
         setRows(data.tasks);
         setNextCursor(data.next_cursor ?? null);
         setScanLimited(Boolean(data.scan_limited));
         setError(null);
       } catch (e) {
-        if (!stopped) setError(e instanceof Error ? e.message : String(e));
+        if (!stopped && seq === requestSeq.current) setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (!stopped) setLoading(false);
+        if (!stopped && seq === requestSeq.current) setLoading(false);
       }
     };
+    setRows(null);
+    setNextCursor(null);
+    setScanLimited(false);
+    setError(null);
     setLoading(true);
     load();
     return () => {
       stopped = true;
     };
-  }, [filters.state, filters.search, limit, reloadKey, retryKey]);
+  }, [filters.state, filters.search, filters.createdAfter, filters.createdBefore,
+      filters.completedAfter, filters.completedBefore, action, limit, reloadKey, retryKey]);
 
   const loadMore = async () => {
     if (!nextCursor || loadingMore) return;
+    const seq = requestSeq.current;
     setLoadingMore(true);
     try {
-      const data = await fetch(`/api/tasks?${queryFor(nextCursor).toString()}`).then((r) => r.json());
-      if (data.detail) throw new Error(String(data.detail));
+      const data = await api.tasks(queryFor(nextCursor));
+      if (seq !== requestSeq.current) return;
       setRows((current) => [...(current ?? []), ...data.tasks]);
       setNextCursor(data.next_cursor ?? null);
       setScanLimited(Boolean(data.scan_limited));
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (seq === requestSeq.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingMore(false);
     }
   };
 
   if (loading && rows === null) return <Skeleton lines={10} height={16} />;
-  if (error) return <ErrorBanner error={error} onRetry={() => setRetryKey((key) => key + 1)} />;
+  if (error && rows === null) return <ErrorBanner error={error} onRetry={() => setRetryKey((key) => key + 1)} />;
   return (
     <div className="table-wrap">
+      {error && <ErrorBanner error={error} onRetry={() => setRetryKey((key) => key + 1)} />}
       <div style={{ padding: "8px 12px" }}>
         <button className="btn" onClick={() => setRetryKey((key) => key + 1)}>刷新搜索</button>
       </div>

@@ -1,8 +1,6 @@
 import { useState } from "react";
 import { api, type PushTaskBody } from "../api";
 
-const SAMPLE = JSON.stringify({ hello: "world", ts: 0 }, null, 2);
-
 export function PushTaskDialog({
   queue,
   open,
@@ -15,7 +13,7 @@ export function PushTaskDialog({
   onPushed: () => void;
 }) {
   const [action, setAction] = useState("");
-  const [payloadText, setPayloadText] = useState("{\n  \"hello\": \"world\"\n}");
+  const [payloadText, setPayloadText] = useState("{}");
   const [delay, setDelay] = useState("0");
   const [expire, setExpire] = useState("0");
   const [logicalKey, setLogicalKey] = useState("");
@@ -27,22 +25,46 @@ export function PushTaskDialog({
   const submit = async () => {
     let payload: Record<string, unknown>;
     try {
-      payload = JSON.parse(payloadText || "{}");
+      const parsed: unknown = JSON.parse(payloadText || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setError("payload 必须是 JSON 对象");
+        return;
+      }
+      payload = parsed as Record<string, unknown>;
     } catch {
       setError("payload 不是合法 JSON");
       return;
     }
+    const selectedAction = action.trim() || payload.action;
+    if (typeof selectedAction !== "string" || !selectedAction.trim()) {
+      setError("请填写已注册的 handler action，或在 payload 中提供 action");
+      return;
+    }
+    const delaySeconds = Number(delay || "0");
+    const expireSeconds = Number(expire || "0");
+    if (![delaySeconds, expireSeconds].every((n) => Number.isInteger(n) && n >= 0)) {
+      setError("延迟和截止秒数必须是非负整数");
+      return;
+    }
     const body: PushTaskBody = {
       payload,
-      action: action || null,
-      delay_seconds: Number(delay) || 0,
-      expire_seconds: Number(expire) || 0,
+      action: action.trim() || null,
+      delay_seconds: delaySeconds,
+      expire_seconds: expireSeconds,
       logical_key: logicalKey || null,
     };
     setBusy(true);
     setError(null);
     try {
-      await api.pushTask(queue, body);
+      const result = await api.pushTask(queue, body);
+      if (!result.accepted) {
+        const reasons: Record<string, string> = {
+          duplicate_active: "相同 logical_key 的任务仍在等待或执行",
+          duplicate_retained: "相同 logical_key 的任务仍在去重保留期",
+        };
+        setError(`未投递：${reasons[result.reason] ?? result.reason ?? "请求未被接受"}${result.duplicate_of ? `；已有任务 ${result.duplicate_of}` : ""}`);
+        return;
+      }
       onPushed();
       onClose();
     } catch (e) {
@@ -55,18 +77,16 @@ export function PushTaskDialog({
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3 style={{ marginTop: 0 }}>投递测试任务 → {queue}</h3>
+        <h3 style={{ marginTop: 0 }}>投递任务 → {queue}</h3>
+        <p className="faint">任务会进入真实队列，由在线 Worker 执行，并可能产生业务副作用。</p>
         <div style={{ display: "grid", gap: 10 }}>
           <label className="faint">
-            action（可选）
+            handler action（或写在 payload.action 中）
             <input className="input" style={{ width: "100%" }} value={action} onChange={(e) => setAction(e.target.value)} placeholder="如 fetch_quote" />
           </label>
           <label className="faint">
             payload（JSON）
             <textarea className="input mono" rows={6} style={{ width: "100%" }} value={payloadText} onChange={(e) => setPayloadText(e.target.value)} />
-            <span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => setPayloadText(SAMPLE)}>
-              填充示例
-            </span>
           </label>
           <div style={{ display: "flex", gap: 10 }}>
             <label className="faint" style={{ flex: 1 }}>

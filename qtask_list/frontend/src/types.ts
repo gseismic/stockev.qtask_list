@@ -59,6 +59,9 @@ export interface TaskRow {
   outcome?: string;
   created_at?: number | string;
   updated_at?: number | string;
+  started_at?: number | string;
+  last_started_at?: number | string;
+  finished_at?: number | string;
   run_at?: number;
   run_at_text?: string;
   logical_key?: string;

@@ -61,3 +61,10 @@
 - 计划文件：`PLAN-021-review-followup.md`
 - 结果文件：`PLAN-021-review-followup-OUTCOME.md`
 - 摘要：复查并修复 Worker 停机领取/handler 准入竞态、外存 pending 回收与手动删除中断窗口、跨队列游标队列快照、队列详情稀疏筛选无界扫描和旧队列缓存；更新测试基线、README、项目使用指南与前端分页交互。隔离 Redis 全量测试 129 passed，ruff、mypy、pnpm build、diff 检查通过。
+
+## 2026-09-29 21:03
+
+- 计划文件：`PLAN-022-cli-dashboard-operations.md`
+- 结果文件：`PLAN-022-cli-dashboard-operations-OUTCOME.md`
+- 设计文件：`docs/design/cli-dashboard-20260929-operations-review.md`
+- 摘要：从值班巡检、跨队列排查、无人消费、过期重放、故障显示和远程访问审查 CLI 与 Dashboard；新增 CLI 异常/JSON 巡检和远程认证保护，修正采样进度口径、告警、全局筛选、刷新、投递及过期任务操作。隔离 Redis 全量测试 136 passed，ruff、mypy、pnpm build 与浏览器场景验证通过。
