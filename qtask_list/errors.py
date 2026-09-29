@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
+
+from .models import EnqueueResult
+
+
+class BatchEnqueueError(Exception):
+    """逐项投递中断；results 是已完成的输入前缀。"""
+
+    def __init__(self, index: int, results: Sequence[EnqueueResult]):
+        super().__init__(f"enqueue_many stopped at index {index}; {len(results)} preceding items committed")
+        self.index = index
+        self.results = list(results)
 
 
 class TaskError(Exception):

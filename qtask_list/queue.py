@@ -9,7 +9,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, cast
 
 import orjson
 import redis
@@ -17,7 +17,7 @@ from loguru import logger
 
 from .clock import Clock, SystemClock, datetime_to_epoch, epoch_to_datetime
 from .envelope import EnvelopeCodec, EnvelopeHeader, PreparedPayload, prepared_from_descriptor
-from .errors import RemoteStorageError, RemoteStorageTransientError
+from .errors import BatchEnqueueError, RemoteStorageError, RemoteStorageTransientError
 from .history import TaskHistory
 from .models import (
     DuplicateAction,
@@ -46,6 +46,8 @@ from .storage import RemoteStorage
 # 单次 Lua 迁移的批量上限，避免同一秒大量任务到期时长期阻塞 Redis。
 MOVE_DELAY_BATCH = 500
 MAX_ENQUEUE_MANY = 1000
+STORAGE_GC_KEY = "qtask:storage:gc"
+STORAGE_PENDING_KEY = "qtask:storage:pending"
 _UNSET = object()
 
 
@@ -122,6 +124,9 @@ class SmartQueue:
         self.lease_prefix = f"{self.base}:lease:"
         self.registry_key = "qtask:queues"
         self.metrics_key = f"qtask:metrics:{self.base}"
+        self.deadline_key = f"qtask:deadline:{self.base}"
+        self.storage_gc_key = STORAGE_GC_KEY
+        self.storage_pending_key = STORAGE_PENDING_KEY
 
         if max_attempts is not None and max_retry is not None and max_attempts != max_retry:
             raise ValueError("max_attempts and deprecated max_retry disagree")
@@ -193,7 +198,7 @@ class SmartQueue:
         marker = ":processing:"
         if marker not in processing_key:
             return None
-        return processing_key.split(marker, 1)[1]
+        return processing_key.rsplit(marker, 1)[1]
 
     @staticmethod
     def _supersede_value(version: int | str | None) -> str:
@@ -230,7 +235,8 @@ class SmartQueue:
         created_at = self.clock.now()
         not_before = datetime_to_epoch(spec.not_before_at)
         available_at = max(created_at, not_before) if not_before is not None else created_at
-        retain_until = self._external_retain_until(spec)
+        # 新任务对象必须覆盖无界 live 与 DLQ；终态之后由 Redis 清理日志回收。
+        retain_until = None
         # JSON 校验和 RemoteStorage 上传均先于 identity 占用。
         prepared = self.codec.prepare(spec.payload, retain_until=retain_until)
         task_id = str(uuid.uuid4())
@@ -270,7 +276,7 @@ class SmartQueue:
         try:
             result = self.r.eval(
                 ENQUEUE_V2_LUA,
-                9,
+                11,
                 self.queue,
                 self.delay,
                 owner_key,
@@ -280,6 +286,8 @@ class SmartQueue:
                 self.registry_key,
                 supersede_key,
                 self.metrics_key,
+                self.deadline_key,
+                self.storage_pending_key,
                 "1" if spec.logical_key else "0",
                 duplicate_action.value,
                 task_id,
@@ -327,7 +335,13 @@ class SmartQueue:
         """按输入顺序投递 TaskSpec；每项可拥有独立身份和时间边界。"""
         if len(specs) > MAX_ENQUEUE_MANY:
             raise ValueError(f"enqueue_many accepts at most {MAX_ENQUEUE_MANY} specs")
-        return [self.enqueue(spec, on_duplicate=on_duplicate) for spec in specs]
+        results: list[EnqueueResult] = []
+        for index, spec in enumerate(specs):
+            try:
+                results.append(self.enqueue(spec, on_duplicate=on_duplicate))
+            except Exception as exc:
+                raise BatchEnqueueError(index, results) from exc
+        return results
 
     def push(
         self,
@@ -466,6 +480,9 @@ class SmartQueue:
             "delay_reason": "schedule" if available_at > created_at else "enqueue",
             "payload_kind": prepared.kind,
             "payload_ref": payload_ref,
+            "payload_dedicated": "1" if prepared.external_dedicated else "0",
+            "payload_storage_id": str(prepared.descriptor.get("storage_id") or ""),
+            "payload_pending": "1" if prepared.descriptor.get("pending") else "0",
             "payload_size": str(prepared.size),
             "payload_checksum": prepared.sha256,
             "payload_descriptor": orjson.dumps(prepared.descriptor).decode("utf-8"),
@@ -496,25 +513,25 @@ class SmartQueue:
                 return EnqueueResult(False, None, logical_key, str(task_id), cast(Any, reason))
         return None
 
-    def _external_retain_until(self, spec: TaskSpec) -> float | None:
-        deadline = datetime_to_epoch(spec.start_deadline_at)
-        if deadline is None:
-            # 无界任务及可无限保留的 DLQ 必须请求持久对象。
-            return None
-        dedup_until = datetime_to_epoch(spec.dedup_until) or deadline
-        return max(deadline, dedup_until) + self.ttl_seconds + self.external_safety_margin
-
     def _cleanup_prepared_if_unreferenced(self, prepared: PreparedPayload) -> None:
-        if not prepared.external_created or not prepared.external_key or self.storage is None:
+        if (
+            not prepared.external_created
+            or not prepared.external_dedicated
+            or not prepared.external_key
+            or self.storage is None
+        ):
             return
-        for task_key in self.r.scan_iter("qtask:task:*"):
-            if self.r.hget(task_key, "payload_ref") == prepared.external_key:
-                return
         self.storage.delete(prepared.external_key)
 
     # ==================== Claim / pop ====================
 
-    def pop_claim(self, timeout: int = 10) -> TaskClaim | None:
+    def pop_claim(
+        self,
+        timeout: int = 10,
+        *,
+        _on_started: Callable[[TaskClaim], None] | None = None,
+        _on_discarded: Callable[[TaskClaim], None] | None = None,
+    ) -> TaskClaim | None:
         """阻塞领取并原子开始一次 attempt。"""
         while True:
             try:
@@ -524,7 +541,9 @@ class SmartQueue:
                 return None
             if not raw_message:
                 return None
-            claim = self._claim_popped(str(raw_message))
+            claim = self._claim_popped(
+                str(raw_message), _on_started=_on_started, _on_discarded=_on_discarded
+            )
             if claim is not None:
                 return claim
 
@@ -556,7 +575,13 @@ class SmartQueue:
             return None, None
         return cast(Dict[str, Any], claim.payload), claim.raw_message
 
-    def _claim_popped(self, raw_message: str) -> TaskClaim | None:
+    def _claim_popped(
+        self,
+        raw_message: str,
+        *,
+        _on_started: Callable[[TaskClaim], None] | None = None,
+        _on_discarded: Callable[[TaskClaim], None] | None = None,
+    ) -> TaskClaim | None:
         try:
             header = self.codec.header(raw_message)
         except Exception as exc:
@@ -590,7 +615,7 @@ class SmartQueue:
 
         result = self.r.eval(
             BEGIN_ATTEMPT_LUA,
-            8,
+            10,
             self.processing,
             f"qtask:task:{header.task_id}",
             self.dlq,
@@ -599,6 +624,8 @@ class SmartQueue:
             lease_key,
             self.delay,
             self.metrics_key,
+            self.storage_gc_key,
+            self.deadline_key,
             raw_message,
             header.task_id,
             "1" if header.logical_key else "0",
@@ -618,28 +645,6 @@ class SmartQueue:
 
         started_message = str(result[1])
         started_header = self.codec.header(started_message)
-        try:
-            payload = self.codec.decode_payload(started_header)
-        except RemoteStorageTransientError as exc:
-            self.fail(
-                started_message,
-                str(exc),
-                code=exc.code,
-                retry_after=exc.retry_after,
-            )
-            return None
-        except RemoteStorageError as exc:
-            self.fail(started_message, str(exc), code=exc.code, permanent=True)
-            return None
-        except Exception as exc:
-            self.fail(
-                started_message,
-                str(exc),
-                code=str(getattr(exc, "code", "payload_decode")),
-                permanent=True,
-            )
-            return None
-
         context = TaskContext(
             task_id=started_header.task_id,
             action=started_header.action,
@@ -653,13 +658,49 @@ class SmartQueue:
             replay_of=started_header.replay_of,
             worker_id=self.worker_id,
         )
-        return TaskClaim(
-            payload=payload,
+        provisional = TaskClaim(
+            payload={},
             raw_message=started_message,
             context=context,
             lease_key=lease_key if started_header.concurrency_key else None,
             lease_token=lease_token or None,
         )
+        if _on_started:
+            _on_started(provisional)
+        try:
+            payload = self.codec.decode_payload(started_header)
+        except RemoteStorageTransientError as exc:
+            try:
+                self.fail(
+                    started_message,
+                    str(exc),
+                    code=exc.code,
+                    retry_after=exc.retry_after,
+                )
+            finally:
+                if _on_discarded:
+                    _on_discarded(provisional)
+            return None
+        except RemoteStorageError as exc:
+            try:
+                self.fail(started_message, str(exc), code=exc.code, permanent=True)
+            finally:
+                if _on_discarded:
+                    _on_discarded(provisional)
+            return None
+        except Exception as exc:
+            try:
+                self.fail(
+                    started_message,
+                    str(exc),
+                    code=str(getattr(exc, "code", "payload_decode")),
+                    permanent=True,
+                )
+            finally:
+                if _on_discarded:
+                    _on_discarded(provisional)
+            return None
+        return replace(provisional, payload=payload)
 
     def _ensure_task_record(self, header: EnvelopeHeader) -> None:
         key = f"qtask:task:{header.task_id}"
@@ -838,7 +879,9 @@ class SmartQueue:
         if moved:
             task_id = self._message_task_id(raw_message)
             if task_id:
-                self.history.update(task_id, {"last_error": reason, "operational_message": 1})
+                self.history.update(task_id, {
+                    "last_error": reason, "operational_message": 1, "location": "delay"
+                })
 
     # ==================== Complete / fail ====================
 
@@ -867,12 +910,14 @@ class SmartQueue:
                 result_json = orjson.dumps(str(result)).decode("utf-8")
         response = self.r.eval(
             COMPLETE_TASK_LUA,
-            5,
+            7,
             self.processing,
             f"qtask:task:{header.task_id}",
             owner_key,
             lease_key,
             self.metrics_key,
+            self.storage_gc_key,
+            self.deadline_key,
             raw_msg,
             header.task_id,
             "1" if header.logical_key else "0",
@@ -916,13 +961,14 @@ class SmartQueue:
             dlq_message = self.codec.encode(data)
             response = self.r.eval(
                 FAIL_TASK_LUA,
-                6,
+                7,
                 self.processing,
                 f"qtask:task:{header.task_id}",
                 self.dlq,
                 owner_key,
                 lease_key,
                 self.metrics_key,
+                self.deadline_key,
                 raw_msg,
                 dlq_message,
                 header.task_id,
@@ -949,13 +995,15 @@ class SmartQueue:
         next_message = self.codec.encode(data)
         response = self.r.eval(
             RETRY_TASK_LUA,
-            6,
+            8,
             self.processing,
             f"qtask:task:{header.task_id}",
             self.delay,
             owner_key,
             lease_key,
             self.metrics_key,
+            self.storage_gc_key,
+            self.deadline_key,
             raw_msg,
             next_message,
             header.task_id,
@@ -1011,6 +1059,7 @@ class SmartQueue:
                     "reason_code": code,
                     "reason": reason,
                     "operational_message": 1,
+                    "location": "dlq",
                 },
             )
         self.r.hincrby(self.metrics_key, f"failure.code.{code}", 1)
@@ -1031,16 +1080,19 @@ class SmartQueue:
                 record = self.history.get(task_id)
                 if record and not record.get("outcome"):
                     # V1 retry List 没有统一状态脚本，兼容迁移时同步回 ready。
-                    self.history.update(task_id, {"status": "pending", "operational_message": 1})
+                    self.history.update(task_id, {
+                        "status": "pending", "operational_message": 1, "location": "ready"
+                    })
         return count + self.move_delay()
 
     def move_delay(self) -> int:
         """原子迁移已经到期的 schedule/retry/concurrency delay。"""
         result = self.r.eval(
             MOVE_DUE_DELAY_LUA,
-            2,
+            3,
             self.delay,
             self.queue,
+            self.metrics_key,
             MOVE_DELAY_BATCH,
         )
         return int(result or 0)
@@ -1050,9 +1102,21 @@ class SmartQueue:
         return self.recover_processing_key(self.processing)
 
     def recover_processing_key(self, processing_key: str) -> int:
+        script = r"""
+        local message = redis.call('RPOPLPUSH', KEYS[1], KEYS[2])
+        if not message then return false end
+        local ok, envelope = pcall(cjson.decode, message)
+        if ok and type(envelope) == 'table' and envelope['task_id'] then
+            local record_key = 'qtask:task:' .. tostring(envelope['task_id'])
+            local kind = redis.call('TYPE', record_key)
+            if type(kind) == 'table' then kind = kind['ok'] end
+            if kind == 'hash' then redis.call('HSET', record_key, 'location', 'ready') end
+        end
+        return message
+        """
         count = 0
         while True:
-            message = self.r.rpoplpush(processing_key, self.queue)
+            message = self.r.eval(script, 2, processing_key, self.queue)
             if not message:
                 break
             count += 1
@@ -1138,16 +1202,19 @@ class SmartQueue:
             if not isinstance(descriptor, dict):
                 raise ValueError("replay source does not retain a payload descriptor")
             prepared = prepared_from_descriptor(descriptor)
-            if prepared.kind == "external" and self.storage and prepared.external_key:
-                retain_until = self._external_retain_until(spec)
-                self.storage.extend_retention(prepared.external_key, retain_until)
-                descriptor = dict(prepared.descriptor)
-                descriptor["retain_until"] = retain_until
-                prepared = prepared_from_descriptor(descriptor)
+            if prepared.kind == "external":
+                if self.storage is None or not prepared.external_key:
+                    raise ValueError("replay external payload requires configured storage")
+                raw_payload = self.storage.load(prepared.external_key)
+                self.codec._verify_payload(raw_payload, prepared.descriptor)
+                prepared = self.codec.prepare(
+                    self.codec._decode_json_object(raw_payload),
+                    retain_until=None,
+                )
         else:
             prepared = self.codec.prepare(
                 cast(Mapping[str, JsonValue], payload),
-                retain_until=self._external_retain_until(spec),
+                retain_until=None,
             )
 
         created_at = self.clock.now()
@@ -1173,6 +1240,7 @@ class SmartQueue:
         source_raw = self._find_task_message(self.dlq, task_id)
         require_source = str(source.get("operational_message", "0")) in {"1", "true", "True"}
         if require_source and source_raw is None:
+            self._cleanup_prepared_if_unreferenced(prepared)
             raise RuntimeError("failed task claims an operational message but is absent from DLQ")
 
         owner_key = self._dedup_key(chosen_logical) if chosen_logical else self._dummy_key("owner", new_task_id)
@@ -1188,7 +1256,7 @@ class SmartQueue:
         )
         result = self.r.eval(
             REPLAY_TASK_LUA,
-            11,
+            14,
             self.dlq,
             self.queue,
             self.delay,
@@ -1200,6 +1268,9 @@ class SmartQueue:
             self.registry_key,
             supersede_key,
             self.metrics_key,
+            self.storage_gc_key,
+            self.deadline_key,
+            self.storage_pending_key,
             source_raw or "",
             "1" if require_source else "0",
             task_id,
@@ -1524,12 +1595,20 @@ class SmartQueue:
         include_dlq: bool = True,
         *,
         identity_policy: IdentityPolicy | str = IdentityPolicy.KEEP,
+        include_processing: bool = False,
+        force_active: bool = False,
     ) -> dict[str, int]:
-        """取消并清理 operational message；默认保留终态后的 identity 边界。"""
+        """取消待执行消息；processing 需显式选择，活跃 Worker 默认受保护。"""
         policy = IdentityPolicy(identity_policy)
+        if include_processing and not force_active:
+            for key in self.processing_keys(include_legacy=False):
+                worker_id = key.rsplit(":", 1)[-1]
+                if self.r.llen(key) and self.r.exists(f"{self.base}:worker:{worker_id}"):
+                    raise ValueError(f"active processing cannot be cleared: {worker_id}")
         removed = 0
         keys = [(self.queue, "list"), (self.retry, "list")]
-        keys.extend((key, "list") for key in self.processing_keys())
+        if include_processing:
+            keys.extend((key, "list") for key in self.processing_keys())
         keys.append((self.delay, "zset"))
         if include_dlq:
             keys.append((self.dlq, "list"))
@@ -1547,6 +1626,7 @@ class SmartQueue:
                     str(raw_message),
                     policy,
                     reason="queue cleared by administrator",
+                    force_active=force_active,
                 )
         return {"messages": removed, "identity_released": int(policy == IdentityPolicy.RELEASE)}
 
@@ -1558,6 +1638,7 @@ class SmartQueue:
         policy: IdentityPolicy,
         *,
         reason: str,
+        force_active: bool = False,
     ) -> int:
         task_id = self._message_task_id(raw_message)
         if not task_id:
@@ -1580,14 +1661,27 @@ class SmartQueue:
             lease_token = self.codec.header(raw_message).lease_token or ""
         except Exception:
             pass
+        worker_id = (
+            self._worker_id_from_processing(source_key)
+            if source_key.startswith(f"{self.base}:processing:")
+            else None
+        )
+        heartbeat_key = (
+            f"{self.base}:worker:{worker_id}"
+            if worker_id
+            else self._dummy_key("heartbeat", task_id)
+        )
         response = self.r.eval(
             CANCEL_OR_PURGE_LUA,
-            5,
+            8,
             source_key,
             f"qtask:task:{task_id}",
             self._dedup_key(logical_key) if logical_key else self._dummy_key("owner", task_id),
             self._lease_key(concurrency_key) if concurrency_key else self._dummy_key("lease", task_id),
             self.metrics_key,
+            self.storage_gc_key,
+            heartbeat_key,
+            self.deadline_key,
             source_type,
             raw_message,
             task_id,
@@ -1597,7 +1691,10 @@ class SmartQueue:
             "admin_clear",
             reason,
             lease_token,
+            "1" if force_active else "0",
         )
+        if str(response[0]) == "active_processing":
+            raise ValueError(f"active processing cannot be deleted: {task_id}")
         return int(str(response[0]) == "removed")
 
     # ==================== Internal helpers ====================

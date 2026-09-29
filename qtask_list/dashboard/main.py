@@ -23,6 +23,7 @@ from qtask_list.admin import QueueAdmin, QueueState
 from qtask_list.archiver import Monitor
 from qtask_list.models import DuplicateAction, IdentityPolicy
 from qtask_list.storage import RemoteStorage
+from qtask_list.security import redis_endpoint_label
 
 
 app = FastAPI(title="qtask_list Dashboard")
@@ -83,6 +84,8 @@ class RecoverRequest(BaseModel):
 class ClearQueueRequest(BaseModel):
     include_dlq: bool = True
     include_history: bool = False
+    include_processing: bool = False
+    confirm_processing: bool = False
     identity_policy: IdentityPolicy = IdentityPolicy.KEEP
     confirm_identity_release: bool = False
 
@@ -172,9 +175,9 @@ def api_health(_auth: None = Depends(require_auth)):
     try:
         redis_client.ping()
         mem_info = monitor.get_memory_info()
-        return {"status": "ok", "redis": REDIS_URL, "memory": mem_info}
-    except Exception as e:
-        return {"status": "error", "error": str(e), "redis": REDIS_URL}
+        return {"status": "ok", "redis": redis_endpoint_label(REDIS_URL), "memory": mem_info}
+    except Exception:
+        return {"status": "error", "error": "Redis unavailable", "redis": redis_endpoint_label(REDIS_URL)}
 
 
 @app.get("/api/queues")
@@ -220,12 +223,24 @@ def api_queue_tasks(
     state: QueueState = Query(QueueState.all, description="Task state"),
     search: Optional[str] = Query(None, description="Search in task data"),
     limit: int = Query(50, ge=1, le=500),
+    cursor: Optional[str] = Query(None, description="Search cursor"),
     created_after: Optional[float] = Query(None, description="Unix timestamp"),
     created_before: Optional[float] = Query(None, description="Unix timestamp"),
     completed_after: Optional[float] = Query(None, description="Unix timestamp"),
     completed_before: Optional[float] = Query(None, description="Unix timestamp"),
     _auth: None = Depends(require_auth),
 ):
+    if search or state in {QueueState.all, QueueState.history, QueueState.completed,
+                 QueueState.failed, QueueState.skipped, QueueState.cancelled}:
+        try:
+            page = admin.search_tasks_page(
+                [name], state=state, search=search, limit=limit, cursor=cursor,
+                created_after=created_after, created_before=created_before,
+                completed_after=completed_after, completed_before=completed_before,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"queue": name, "state": state.value, **page}
     tasks = admin.list_tasks(
         name,
         state=state,
@@ -350,12 +365,18 @@ def api_clear_queue(
             status_code=400,
             detail="释放 logical identity 需要 confirm_identity_release=true",
         )
-    return admin.clear_queue(
-        name,
-        include_dlq=request.include_dlq,
-        include_history=request.include_history,
-        identity_policy=request.identity_policy,
-    )
+    if request.include_processing and not request.confirm_processing:
+        raise HTTPException(status_code=400, detail="清理 processing 需要 confirm_processing=true")
+    try:
+        return admin.clear_queue(
+            name,
+            include_dlq=request.include_dlq,
+            include_history=request.include_history,
+            identity_policy=request.identity_policy,
+            include_processing=request.include_processing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/tasks")
@@ -365,28 +386,18 @@ def api_tasks(
     action: Optional[str] = Query(None, description="Filter by action"),
     search: Optional[str] = Query(None, description="Search in task data"),
     limit: int = Query(50, ge=1, le=500),
+    cursor: Optional[str] = Query(None, description="Search cursor"),
     _auth: None = Depends(require_auth),
 ):
-    queues = [queue] if queue else [item["name"] for item in admin.list_queues()]
-    tasks: list[Dict[str, Any]] = []
+    queues = [queue] if queue else admin.queue_names()
     selected_state = QueueState(status) if status in QueueState._value2member_map_ else QueueState.all
-
-    for queue_name in queues:
-        remaining = max(limit - len(tasks), 0)
-        if remaining <= 0:
-            break
-        for task in admin.list_tasks(queue_name, state=selected_state, limit=remaining, search=search):
-            if action and task.get("action") != action:
-                continue
-            tasks.append(task)
-            if len(tasks) >= limit:
-                break
-
-    return {
-        "tasks": tasks,
-        "count": len(tasks),
-        "filters": {"queue": queue, "status": status, "action": action, "search": search},
-    }
+    try:
+        page = admin.search_tasks_page(
+            queues, state=selected_state, action=action, search=search, limit=limit, cursor=cursor
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**page, "filters": {"queue": queue, "status": status, "action": action, "search": search}}
 
 
 @app.get("/api/task/{task_id}")
@@ -451,7 +462,10 @@ def api_task_delete(
     queue: Optional[str] = Query(None, description="Limit deletion to one queue"),
     _auth: None = Depends(require_auth),
 ):
-    return admin.delete_task(task_id, queue_name=queue)
+    try:
+        return admin.delete_task(task_id, queue_name=queue)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.delete("/api/queue/{name}")
@@ -462,7 +476,10 @@ def api_delete_queue(
 ):
     if not confirm:
         raise HTTPException(status_code=400, detail="删除队列需要 confirm=true")
-    return admin.delete_queue(name)
+    try:
+        return admin.delete_queue(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/", response_class=HTMLResponse)

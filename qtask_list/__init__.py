@@ -3,7 +3,7 @@ from .worker import Worker
 from .storage import RemoteStorage
 from .admin import QueueAdmin, QueueState
 from .clock import Clock, FrozenClock, SystemClock
-from .errors import PermanentTaskError, RetryableTaskError
+from .errors import BatchEnqueueError, PermanentTaskError, RetryableTaskError
 from .models import (
     DuplicateAction,
     EnqueueResult,
@@ -13,8 +13,10 @@ from .models import (
     TaskResult,
     TaskSpec,
 )
+from .security import redis_endpoint_label
 
 __all__ = [
+    "BatchEnqueueError",
     "Clock",
     "DuplicateAction",
     "EnqueueResult",
@@ -63,15 +65,13 @@ def start_dashboard(
         >>> from qtask_list import start_dashboard
         >>> start_dashboard(port=9000)
     """
+    import importlib.util
     import os
     import subprocess
     import sys
-    
-    # 找到 dashboard/main.py 的路径
-    import qtask_list
-    pkg_dir = os.path.dirname(qtask_list.__file__)
-    dashboard_path = os.path.join(pkg_dir, "..", "dashboard", "main.py")
-    dashboard_path = os.path.abspath(dashboard_path)
+
+    if importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("uvicorn") is None:
+        raise RuntimeError("Dashboard 依赖未安装，请执行 pip install qtask_list[dashboard]")
     
     # 设置环境变量
     env = os.environ.copy()
@@ -87,7 +87,7 @@ def start_dashboard(
     # 启动 dashboard
     display_host = "localhost" if host in {"0.0.0.0", "::", "127.0.0.1"} else host
     print(f"Starting qtask_list Dashboard on http://{display_host}:{port}")
-    print(f"Redis: {redis_url}")
+    print(f"Redis: {redis_endpoint_label(redis_url)}")
     print(f"Auth: {'enabled' if password else 'disabled'}")
     print("\nPress Ctrl+C to stop\n")
     
@@ -96,7 +96,7 @@ def start_dashboard(
             sys.executable,
             "-m",
             "uvicorn",
-            "dashboard.main:app",
+            "qtask_list.dashboard.main:app",
             "--host",
             host,
             "--port",

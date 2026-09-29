@@ -61,9 +61,18 @@ local queue_name = ARGV[9]
 local has_supersede = ARGV[10] == '1'
 local supersede_value = ARGV[11]
 local created_at = tonumber(ARGV[12])
+local fresh_queue = redis.call('ZSCORE', KEYS[7], queue_name) == false
 
 if redis.call('EXISTS', KEYS[5]) == 1 then
     return {'task_id_collision', task_id}
+end
+if record['payload_pending'] == '1' then
+    local pending_key = KEYS[11] .. ':' .. tostring(record['payload_storage_id'])
+    local claim_key = 'qtask:storage:claim:' .. tostring(record['payload_storage_id']) .. ':' .. tostring(record['payload_ref'])
+    if not redis.call('ZSCORE', pending_key, tostring(record['payload_ref'])) or
+       redis.call('EXISTS', claim_key) == 1 then
+        return {'payload_expired', task_id}
+    end
 end
 
 local duplicate_of = ''
@@ -114,6 +123,13 @@ if duplicate_of ~= '' then
 end
 redis.call('ZADD', KEYS[6], created_at, task_id)
 redis.call('ZADD', KEYS[7], now, queue_name)
+if fresh_queue and redis.call('ZCARD', KEYS[6]) == 1 then
+    redis.call('HSET', KEYS[9], 'observation.version', 2)
+end
+local start_deadline = tonumber(record['start_deadline_at'] or '')
+if start_deadline then
+    redis.call('ZADD', KEYS[10], start_deadline, task_id)
+end
 
 if has_supersede then
     local current = redis.call('GET', KEYS[8])
@@ -128,6 +144,10 @@ if available_at > now then
     location = 'delay'
 else
     redis.call('LPUSH', KEYS[1], raw_message)
+end
+redis.call('HSET', KEYS[5], 'location', location)
+if record['payload_pending'] == '1' then
+    redis.call('ZREM', KEYS[11] .. ':' .. tostring(record['payload_storage_id']), tostring(record['payload_ref']))
 end
 redis.call('HINCRBY', KEYS[9], 'enqueue.accepted', 1)
 if duplicate_of ~= '' then
@@ -184,9 +204,18 @@ local function terminalize(outcome, code, reason, now, operational)
         'updated_at', tostring(now),
         'operational_message', operational
     )
+    redis.call('HSET', KEYS[2], 'location', operational == '1' and 'dlq' or 'history')
     finalize_owner(outcome, now)
+    redis.call('ZREM', KEYS[10], ARGV[2])
     if operational == '0' then
         redis.call('EXPIRE', KEYS[2], tonumber(ARGV[10]))
+        if redis.call('HGET', KEYS[2], 'payload_dedicated') == '1' then
+            local payload_ref = redis.call('HGET', KEYS[2], 'payload_ref') or ''
+            local storage_id = redis.call('HGET', KEYS[2], 'payload_storage_id') or ''
+            if payload_ref ~= '' and storage_id ~= '' then
+                redis.call('ZADD', KEYS[9] .. ':' .. storage_id, now + tonumber(ARGV[10]), payload_ref)
+            end
+        end
     end
 end
 
@@ -264,6 +293,7 @@ if ARGV[6] == '1' then
             'HSET', KEYS[2],
             'available_at', tostring(run_at),
             'delay_reason', 'concurrency',
+            'location', 'delay',
             'updated_at', tostring(now)
         )
         redis.call('HINCRBY', KEYS[8], 'concurrency.deferred', 1)
@@ -283,6 +313,7 @@ if removed == 0 then
     return {'not_found'}
 end
 redis.call('LPUSH', KEYS[1], started_message)
+redis.call('ZREM', KEYS[10], task_id)
 redis.call(
     'HSET', KEYS[2],
     'attempt', tostring(attempt),
@@ -291,6 +322,7 @@ redis.call(
     'available_at', tostring(now),
     'delay_reason', ''
 )
+redis.call('HSET', KEYS[2], 'location', 'processing')
 if not redis.call('HGET', KEYS[2], 'started_at') then
     redis.call('HSET', KEYS[2], 'started_at', tostring(now))
 end
@@ -342,10 +374,19 @@ redis.call(
     'reason_code', '',
     'reason', ''
 )
+redis.call('HSET', KEYS[2], 'location', 'history')
 if ARGV[6] ~= '' and ARGV[7] == 'full' then
     redis.call('HSET', KEYS[2], 'result', ARGV[6])
 end
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
+redis.call('ZREM', KEYS[7], task_id)
+if redis.call('HGET', KEYS[2], 'payload_dedicated') == '1' then
+    local payload_ref = redis.call('HGET', KEYS[2], 'payload_ref') or ''
+    local storage_id = redis.call('HGET', KEYS[2], 'payload_storage_id') or ''
+    if payload_ref ~= '' and storage_id ~= '' then
+        redis.call('ZADD', KEYS[6] .. ':' .. storage_id, now + tonumber(ARGV[5]), payload_ref)
+    end
+end
 finalize_owner('completed', now)
 if ARGV[4] ~= '' and redis.call('GET', KEYS[4]) == ARGV[4] then
     redis.call('DEL', KEYS[4])
@@ -398,7 +439,16 @@ if deadline and run_at >= deadline then
         'updated_at', tostring(now),
         'operational_message', '0'
     )
+    redis.call('HSET', KEYS[2], 'location', 'history')
     redis.call('EXPIRE', KEYS[2], tonumber(ARGV[7]))
+    redis.call('ZREM', KEYS[8], task_id)
+    if redis.call('HGET', KEYS[2], 'payload_dedicated') == '1' then
+        local payload_ref = redis.call('HGET', KEYS[2], 'payload_ref') or ''
+        local storage_id = redis.call('HGET', KEYS[2], 'payload_storage_id') or ''
+        if payload_ref ~= '' and storage_id ~= '' then
+            redis.call('ZADD', KEYS[7] .. ':' .. storage_id, now + tonumber(ARGV[7]), payload_ref)
+        end
+    end
     finalize_owner('skipped', now)
     if ARGV[9] ~= '' and redis.call('GET', KEYS[5]) == ARGV[9] then
         redis.call('DEL', KEYS[5])
@@ -410,6 +460,8 @@ end
 local removed = redis.call('LREM', KEYS[1], 1, raw_message)
 if removed == 0 then return {'not_found'} end
 redis.call('ZADD', KEYS[3], run_at, next_message)
+if deadline then redis.call('ZADD', KEYS[8], deadline, task_id) end
+redis.call('HINCRBY', KEYS[6], 'retry_wait.current', 1)
 redis.call(
     'HSET', KEYS[2],
     'last_error_code', ARGV[5],
@@ -420,6 +472,7 @@ redis.call(
     'updated_at', tostring(now),
     'operational_message', '1'
 )
+redis.call('HSET', KEYS[2], 'location', 'delay')
 if ARGV[9] ~= '' and redis.call('GET', KEYS[5]) == ARGV[9] then
     redis.call('DEL', KEYS[5])
 end
@@ -459,6 +512,7 @@ if outcome ~= '' and outcome ~= 'none' then return {'terminal', outcome} end
 local removed = redis.call('LREM', KEYS[1], 1, raw_message)
 if removed == 0 then return {'not_found'} end
 redis.call('LPUSH', KEYS[3], dlq_message)
+redis.call('ZREM', KEYS[7], task_id)
 local now = redis_now()
 redis.call(
     'HSET', KEYS[2],
@@ -473,6 +527,7 @@ redis.call(
     'updated_at', tostring(now),
     'operational_message', '1'
 )
+redis.call('HSET', KEYS[2], 'location', 'dlq')
 finalize_owner('failed', now)
 if ARGV[7] ~= '' and redis.call('GET', KEYS[5]) == ARGV[7] then
     redis.call('DEL', KEYS[5])
@@ -498,6 +553,9 @@ local raw_message = ARGV[2]
 local task_id = ARGV[3]
 local identity_policy = ARGV[4]
 local has_owner = ARGV[5] == '1'
+if ARGV[10] ~= '1' and redis.call('EXISTS', KEYS[7]) == 1 then
+    return {'active_processing'}
+end
 local removed = 0
 if source_type == 'zset' then
     removed = redis.call('ZREM', KEYS[1], raw_message)
@@ -507,7 +565,36 @@ end
 if removed == 0 then return {'not_found'} end
 
 local now = redis_now()
+if key_type(KEYS[2]) == 'string' then
+    local old_raw = redis.call('GET', KEYS[2])
+    local ok, old_record = pcall(cjson.decode, old_raw)
+    redis.call('DEL', KEYS[2])
+    if ok and type(old_record) == 'table' then
+        for field, value in pairs(old_record) do
+            if type(value) == 'string' or type(value) == 'number' or type(value) == 'boolean' then
+                redis.call('HSET', KEYS[2], field, tostring(value))
+            end
+        end
+    end
+    redis.call('HSET', KEYS[2], 'task_id', task_id)
+end
+redis.call('ZREM', KEYS[8], task_id)
+if source_type == 'zset' then
+    local ok, envelope = pcall(cjson.decode, raw_message)
+    if ok and type(envelope) == 'table' and envelope['delay_reason'] == 'retry' then
+        local current = tonumber(redis.call('HGET', KEYS[5], 'retry_wait.current') or '0')
+        if current > 0 then redis.call('HINCRBY', KEYS[5], 'retry_wait.current', -1) end
+    end
+end
 local outcome = redis.call('HGET', KEYS[2], 'outcome') or ''
+if outcome == '' then
+    local legacy_status = redis.call('HGET', KEYS[2], 'status') or ''
+    if legacy_status == 'completed' or legacy_status == 'failed' or
+       legacy_status == 'skipped' or legacy_status == 'cancelled' then
+        outcome = legacy_status
+        redis.call('HSET', KEYS[2], 'outcome', outcome)
+    end
+end
 if outcome == '' or outcome == 'none' then
     outcome = 'cancelled'
     redis.call(
@@ -525,7 +612,15 @@ redis.call(
     'updated_at', tostring(now),
     'purged_at', tostring(now)
 )
+redis.call('HSET', KEYS[2], 'location', 'history')
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[6]))
+if redis.call('HGET', KEYS[2], 'payload_dedicated') == '1' then
+    local payload_ref = redis.call('HGET', KEYS[2], 'payload_ref') or ''
+    local storage_id = redis.call('HGET', KEYS[2], 'payload_storage_id') or ''
+    if payload_ref ~= '' and storage_id ~= '' then
+        redis.call('ZADD', KEYS[6] .. ':' .. storage_id, now + tonumber(ARGV[6]), payload_ref)
+    end
+end
 
 if has_owner and key_type(KEYS[3]) == 'hash' and redis.call('HGET', KEYS[3], 'task_id') == task_id then
     if identity_policy == 'release' then
@@ -576,6 +671,7 @@ if redis.call('EXISTS', KEYS[3]) == 1 then
     redis.call(
         'HSET', KEYS[3],
         'operational_message', '1',
+        'location', 'ready',
         'manual_moved_at', tostring(now),
         'updated_at', tostring(now)
     )
@@ -594,7 +690,18 @@ while count < limit do
     if #tasks == 0 then break end
     local task = tasks[1]
     if redis.call('ZREM', KEYS[1], task) == 1 then
+        local ok, envelope = pcall(cjson.decode, task)
+        if ok and type(envelope) == 'table' and envelope['delay_reason'] == 'retry' then
+            local current = tonumber(redis.call('HGET', KEYS[3], 'retry_wait.current') or '0')
+            if current > 0 then redis.call('HINCRBY', KEYS[3], 'retry_wait.current', -1) end
+        end
         redis.call('LPUSH', KEYS[2], task)
+        if ok and type(envelope) == 'table' and envelope['task_id'] then
+            local record_key = 'qtask:task:' .. tostring(envelope['task_id'])
+            if redis.call('EXISTS', record_key) == 1 then
+                redis.call('HSET', record_key, 'location', 'ready')
+            end
+        end
         count = count + 1
     end
 end
@@ -668,6 +775,7 @@ local has_supersede = ARGV[12] == '1'
 local supersede_value = ARGV[13]
 local created_at = tonumber(ARGV[14])
 local ttl_seconds = tonumber(ARGV[15])
+local fresh_queue = redis.call('ZSCORE', KEYS[9], queue_name) == false
 
 if redis.call('EXISTS', KEYS[6]) == 0 then return {'missing_source'} end
 local old_outcome = redis.call('HGET', KEYS[6], 'outcome') or redis.call('HGET', KEYS[6], 'status') or ''
@@ -675,6 +783,14 @@ if old_outcome ~= 'failed' and old_outcome ~= 'skipped' and old_outcome ~= 'canc
     return {'not_replayable', old_outcome}
 end
 if redis.call('EXISTS', KEYS[7]) == 1 then return {'task_id_collision'} end
+if record['payload_pending'] == '1' then
+    local pending_key = KEYS[14] .. ':' .. tostring(record['payload_storage_id'])
+    local claim_key = 'qtask:storage:claim:' .. tostring(record['payload_storage_id']) .. ':' .. tostring(record['payload_ref'])
+    if not redis.call('ZSCORE', pending_key, tostring(record['payload_ref'])) or
+       redis.call('EXISTS', claim_key) == 1 then
+        return {'payload_expired', new_task_id}
+    end
+end
 
 local generation = 1
 if has_identity then
@@ -700,10 +816,18 @@ local now = redis_now()
 redis.call(
     'HSET', KEYS[6],
     'operational_message', '0',
+    'location', 'history',
     'replayed_by', new_task_id,
     'updated_at', tostring(now)
 )
 redis.call('EXPIRE', KEYS[6], ttl_seconds)
+if redis.call('HGET', KEYS[6], 'payload_dedicated') == '1' then
+    local payload_ref = redis.call('HGET', KEYS[6], 'payload_ref') or ''
+    local storage_id = redis.call('HGET', KEYS[6], 'payload_storage_id') or ''
+    if payload_ref ~= '' and storage_id ~= '' then
+        redis.call('ZADD', KEYS[12] .. ':' .. storage_id, now + ttl_seconds, payload_ref)
+    end
+end
 
 if has_identity then
     if key_type(KEYS[4]) ~= 'none' then redis.call('DEL', KEYS[4]) end
@@ -725,6 +849,13 @@ end
 redis.call('HSET', KEYS[7], 'generation', tostring(generation))
 redis.call('ZADD', KEYS[8], created_at, new_task_id)
 redis.call('ZADD', KEYS[9], now, queue_name)
+if fresh_queue and redis.call('ZCARD', KEYS[8]) == 1 then
+    redis.call('HSET', KEYS[11], 'observation.version', 2)
+end
+local start_deadline = tonumber(record['start_deadline_at'] or '')
+if start_deadline then
+    redis.call('ZADD', KEYS[13], start_deadline, new_task_id)
+end
 
 if has_supersede then
     local current = redis.call('GET', KEYS[10])
@@ -739,6 +870,10 @@ if available_at > now then
     location = 'delay'
 else
     redis.call('LPUSH', KEYS[2], new_message)
+end
+redis.call('HSET', KEYS[7], 'location', location)
+if record['payload_pending'] == '1' then
+    redis.call('ZREM', KEYS[14] .. ':' .. tostring(record['payload_storage_id']), tostring(record['payload_ref']))
 end
 redis.call('HINCRBY', KEYS[11], 'replay.accepted', 1)
 redis.call('HINCRBY', KEYS[11], 'enqueue.accepted', 1)

@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import requests
+import os
 from loguru import logger
 
 from .errors import (
@@ -25,6 +26,9 @@ class StoredObject:
     key: str
     created: bool = False
     retain_until: float | None = None
+    dedicated: bool = False
+    storage_id: str | None = None
+    pending: bool = False
 
 
 class RemoteStorage:
@@ -34,20 +38,33 @@ class RemoteStorage:
     “退避重试”还是“永久失败进 DLQ”。
     """
 
-    def __init__(self, api_base_url: str, timeout: float | None = 30):
+    def __init__(
+        self,
+        api_base_url: str,
+        timeout: float | None = 30,
+        token: str | None = None,
+    ):
         if not api_base_url:
             raise ValueError("api_base_url must not be empty")
         self.api_base_url = api_base_url.rstrip("/")
         self.session = requests.Session()
+        resolved_token = token if token is not None else os.environ.get("QTASK_STORAGE_TOKEN", "")
+        if resolved_token:
+            self.session.headers["Authorization"] = f"Bearer {resolved_token}"
         self.timeout = timeout
 
-    def save(self, data: bytes, retain_until: float | None = None) -> StoredObject:
-        """上传 bytes，并请求服务端至少保留到 retain_until；None/0 表示持久保留。"""
+    def save(
+        self, data: bytes, retain_until: float | None = None, *, managed: bool = False
+    ) -> StoredObject:
+        """上传 bytes；托管上传需在宽限期内完成队列入队。"""
         if not data:
             raise ValueError("data must not be empty")
         url = f"{self.api_base_url}/api/storage/upload"
         files = {"file": ("payload.bin", data)}
-        form = {"retain_until": "0" if retain_until is None else str(retain_until)}
+        form = {
+            "retain_until": "0" if retain_until is None else str(retain_until),
+            "managed": "1" if managed else "0",
+        }
         response = self._request("post", url, files=files, data=form)
         try:
             body = response.json()
@@ -62,11 +79,18 @@ class RemoteStorage:
             key=key,
             created=bool(body.get("created", False)),
             retain_until=self._float_or_none(body.get("retain_until", retain_until)),
+            dedicated=bool(body.get("dedicated", False)),
+            storage_id=str(body["storage_id"]) if body.get("storage_id") else None,
+            pending=bool(body.get("pending", False)),
         )
 
     def save_bytes(self, data: bytes, retain_until: float | None = None) -> str:
         """兼容接口：上传 bytes 并只返回 key。"""
         return self.save(data, retain_until=retain_until).key
+
+    def save_managed(self, data: bytes, retain_until: float | None = None) -> StoredObject:
+        """队列托管对象：上传先写待入队回收记录。"""
+        return self.save(data, retain_until=retain_until, managed=True)
 
     def load(self, key: str) -> bytes:
         """下载对象；404 被分类为永久 object_missing。"""

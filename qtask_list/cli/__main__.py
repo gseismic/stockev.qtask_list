@@ -17,6 +17,9 @@ from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
+from qtask_list.security import redis_endpoint_label
+from qtask_list.storage import RemoteStorage
+
 if TYPE_CHECKING:
     from qtask_list import QueueAdmin, Worker
 
@@ -63,7 +66,9 @@ def normalize_queue_name(queue_name: str, namespace: Optional[str] = None) -> st
 
 
 def admin_from_url(redis_url: str) -> QueueAdmin:
-    return QueueAdmin(redis_url=redis_url)
+    storage_url = os.environ.get("QTASK_STORAGE_URL", "")
+    storage = RemoteStorage(storage_url) if storage_url else None
+    return QueueAdmin(redis_url=redis_url, storage=storage)
 
 
 def json_dumps(data: Any) -> str:
@@ -143,6 +148,19 @@ def load_worker_from_module(module_spec: str) -> Worker:
     if not isinstance(loaded, Worker):
         raise typer.BadParameter(f"{module_spec} must resolve to a qtask_list.Worker instance")
     return loaded
+
+
+@app.command("rebuild-observation")
+def rebuild_observation(
+    queue_name: str = typer.Argument(..., help="需要回填的旧队列名称"),
+    redis_url: str = typer.Option(DEFAULT_REDIS_URL, "--redis", help="Redis URL"),
+):
+    """维护窗口内回填旧队列的截止时间和重试等待索引。"""
+    try:
+        result = admin_from_url(redis_url).rebuild_observation_indexes(queue_name)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(json_dumps(result))
 
 
 @app.command()
@@ -309,6 +327,9 @@ def clear(
     queue_name: str = typer.Argument(..., help="队列名称"),
     include_dlq: bool = typer.Option(True, "--include-dlq/--no-dlq", help="是否包含 DLQ"),
     include_history: bool = typer.Option(False, "--include-history", help="是否包含任务历史"),
+    include_processing: bool = typer.Option(
+        False, "--include-processing", help="同时清理失联 Worker 的 processing；活跃 Worker 受保护"
+    ),
     release_identity: bool = typer.Option(
         False,
         "--release-identity",
@@ -326,15 +347,22 @@ def clear(
             console.print("[red]History records for this queue will also be removed[/red]")
         if release_identity:
             console.print("[red]Logical identity owners will be released[/red]")
+        if include_processing:
+            console.print("[red]Stale processing messages will also be removed[/red]")
         if not typer.confirm("Continue?"):
             raise typer.Abort()
 
-    result = admin_from_url(redis_url).clear_queue(
-        queue_name,
-        include_dlq=include_dlq,
-        include_history=include_history,
-        identity_policy="release" if release_identity else "keep",
-    )
+    try:
+        result = admin_from_url(redis_url).clear_queue(
+            queue_name,
+            include_dlq=include_dlq,
+            include_history=include_history,
+            identity_policy="release" if release_identity else "keep",
+            include_processing=include_processing,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     history_count = result["history_records"]
 
     suffix = f" and {history_count} history records" if include_history else ""
@@ -652,7 +680,7 @@ def dashboard(
         os.environ.get("QTASK_DASHBOARD_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
     )
     console.print(f"[green]Starting Dashboard on http://{display_host}:{port}[/green]")
-    console.print(f"[cyan]Redis: {redis_url}[/cyan]")
+    console.print(f"[cyan]Redis: {redis_endpoint_label(redis_url)}[/cyan]")
     console.print(f"[cyan]Auth: {'enabled' if auth_enabled else 'disabled'}[/cyan]")
     console.print("Press Ctrl+C to stop\n")
 
@@ -731,7 +759,11 @@ def task_delete(
         if not typer.confirm("Continue?"):
             raise typer.Abort()
 
-    result = admin_from_url(redis_url).delete_task(task_id, normalized_queue)
+    try:
+        result = admin_from_url(redis_url).delete_task(task_id, normalized_queue)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     if json_output:
         console.print_json(json_dumps(result))
     else:
@@ -795,8 +827,9 @@ def task_replay(
 def storage(
     port: int = typer.Option(8096, "--port", "-p", help="监听端口"),
     data_dir: str = typer.Option("", "--data-dir", "-d", help="数据目录，默认 ~/.qtask-storage"),
-    host: str = typer.Option("0.0.0.0", "--host", help="监听地址"),
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址；远程监听需设置 QTASK_STORAGE_TOKEN"),
     ttl_days: float = typer.Option(7.0, "--ttl-days", help="文件保留天数，0=永不过期"),
+    gc_redis: str = typer.Option(DEFAULT_REDIS_URL, "--gc-redis", help="外存回收日志所在 Redis"),
 ):
     """启动 RemoteStorage 服务（大 payload 外存）"""
     try:
@@ -807,8 +840,14 @@ def storage(
 
     import uvicorn
 
+    if host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get(
+        "QTASK_STORAGE_TOKEN"
+    ):
+        console.print("[red]远程监听需要设置 QTASK_STORAGE_TOKEN[/red]")
+        raise typer.Exit(2)
+
     data_path = Path(data_dir) if data_dir else storage_server.DEFAULT_DIR
-    storage_server.configure(data_path, ttl_days)
+    storage_server.configure(data_path, ttl_days, gc_redis)
     storage_server._start_cleanup_thread()
 
     console.print(f"[green]RemoteStorage 启动: port={port}, data={data_path}, ttl={ttl_days}天[/green]")

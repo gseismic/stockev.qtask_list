@@ -85,6 +85,7 @@ class Worker:
         self.result_queue = result_queue
         self._heartbeat_prefix = f"{self.queue.base}:worker:"
         self._heartbeat_key = f"{self._heartbeat_prefix}{self.worker_id}"
+        self._worker_registry_key = f"qtask:workers:{self.queue.base}"
         self._leader_key = f"{self.queue.base}:maintenance:leader"
         self._leader_token = uuid.uuid4().hex
 
@@ -100,6 +101,8 @@ class Worker:
         # maintenance 线程只用该事件唤醒/退出；停止事件专门提供给 TaskContext，
         # 不能因为维护线程轮询而清除，否则 handler 会丢失 stop_requested 信号。
         self._maintenance_wakeup = threading.Event()
+        # 心跳与租约必须独立于归档等慢维护操作。
+        self._heartbeat_wakeup = threading.Event()
         self._draining = False
         self._active_claims: dict[str, TaskClaim] = {}
         self._active_claims_lock = threading.Lock()
@@ -114,16 +117,17 @@ class Worker:
         self.alert_callback = alert_callback
 
     def _refresh_heartbeat(self) -> None:
-        self.queue.r.set(
-            self._heartbeat_key,
-            str(self.queue.clock.now()),
-            ex=self.heartbeat_ttl,
-        )
+        now = self.queue.clock.now()
+        pipe = self.queue.r.pipeline(transaction=True)
+        pipe.set(self._heartbeat_key, str(now), ex=self.heartbeat_ttl)
+        pipe.zadd(self._worker_registry_key, {self.worker_id: now})
+        pipe.execute()
 
     def _cleanup_worker_state(self) -> None:
         if self.queue.r.llen(self.queue.processing) == 0:
             self.queue.r.delete(self.queue.processing)
         self.queue.r.delete(self._heartbeat_key)
+        self.queue.r.zrem(self._worker_registry_key, self.worker_id)
         release_script = r"""
         if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
         return redis.call('DEL', KEYS[1])
@@ -175,6 +179,8 @@ class Worker:
         try:
             self._process_task(claim)
         finally:
+            with self._active_claims_lock:
+                self._active_claims.pop(claim.context.task_id, None)
             if self._semaphore:
                 self._semaphore.release()
 
@@ -194,8 +200,6 @@ class Worker:
             )
             return
 
-        with self._active_claims_lock:
-            self._active_claims[claim.context.task_id] = claim
         try:
             if self._handler_accepts_context[action]:
                 result = handler(claim.payload, claim.context)
@@ -253,8 +257,6 @@ class Worker:
                 code="handler_unclassified",
             )
         finally:
-            with self._active_claims_lock:
-                self._active_claims.pop(claim.context.task_id, None)
             duration = max(time.monotonic() - started_monotonic, 0.0)
             pipe = self.queue.r.pipeline()
             pipe.hincrbyfloat(self.queue.metrics_key, "handler_duration_seconds.total", duration)
@@ -267,6 +269,25 @@ class Worker:
         for claim in claims:
             if not self.queue.renew_claim_lease(claim):
                 logger.error(f"Concurrency lease lost task={claim.context.task_id}")
+
+    def _register_claim(self, claim: TaskClaim) -> None:
+        with self._active_claims_lock:
+            self._active_claims[claim.context.task_id] = claim
+
+    def _discard_claim(self, claim: TaskClaim) -> None:
+        with self._active_claims_lock:
+            self._active_claims.pop(claim.context.task_id, None)
+
+    def _heartbeat_loop(self) -> None:
+        """独立续租所有已领取任务，包含等待线程池执行的 claim。"""
+        while self.running or self._draining:
+            try:
+                self._refresh_heartbeat()
+                self._renew_active_leases()
+            except Exception as exc:
+                logger.exception(f"Heartbeat renewal failed: {exc}")
+            if self._heartbeat_wakeup.wait(self.heartbeat_interval):
+                self._heartbeat_wakeup.clear()
 
     def _acquire_maintenance_leader(self) -> bool:
         ttl = max(self.heartbeat_ttl, 30)
@@ -327,7 +348,7 @@ class Worker:
                 logger.error(f"Alert callback failed: {exc}")
 
     def _maintenance_loop(self) -> None:
-        """独立刷新 heartbeat/lease；leader 执行恢复、归档、诊断和告警。"""
+        """leader 执行恢复、归档、诊断和告警；心跳由独立线程负责。"""
         from .archiver import ArchiveManager, Monitor
 
         archiver = None
@@ -343,8 +364,6 @@ class Worker:
         last_stale_recover = 0.0
         while self.running or self._draining:
             try:
-                self._refresh_heartbeat()
-                self._renew_active_leases()
                 now = self.queue.clock.now()
                 is_leader = self._acquire_maintenance_leader()
                 if self.running and is_leader:
@@ -394,15 +413,28 @@ class Worker:
         try:
             self._refresh_heartbeat()
             self.queue.move_retry()
-            claim = self.queue.pop_claim(timeout=2)
+            claim = self.queue.pop_claim(
+                timeout=2,
+                _on_started=self._register_claim,
+                _on_discarded=self._discard_claim,
+            )
             if claim is None:
                 return False
+            self._register_claim(claim)
             if self.max_workers > 1:
                 acquired = False
                 assert self.executor is not None
-                self.executor.submit(self._process_task_with_semaphore, claim)
+                try:
+                    self.executor.submit(self._process_task_with_semaphore, claim)
+                except RuntimeError:
+                    # 提交失败时直接处理已领取任务，避免消息留在活跃 processing。
+                    self._process_task_with_semaphore(claim)
             else:
-                self._process_task(claim)
+                try:
+                    self._process_task(claim)
+                finally:
+                    with self._active_claims_lock:
+                        self._active_claims.pop(claim.context.task_id, None)
             return True
         finally:
             if acquired and self._semaphore:
@@ -431,8 +463,10 @@ class Worker:
     def run(self) -> None:
         """启动 Worker；优雅停止期间继续 heartbeat 和 lease 续租。"""
         self.running = True
+        self._draining = False
         self._shutdown_event.clear()
         self._maintenance_wakeup.clear()
+        self._heartbeat_wakeup.clear()
         if threading.current_thread() is threading.main_thread():
             try:
                 signal.signal(signal.SIGINT, self._signal_handler)
@@ -444,6 +478,8 @@ class Worker:
         if recovered:
             logger.info(f"Recovered {recovered} tasks from stale processing queues")
         self._refresh_heartbeat()
+        heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
         maintenance_thread = threading.Thread(target=self._maintenance_loop, daemon=True)
         maintenance_thread.start()
         if self.max_workers > 1:
@@ -452,12 +488,13 @@ class Worker:
         try:
             self._worker_loop()
         finally:
-            self._draining = self.executor is not None
             self.stop(reason="worker_loop_exit")
-            if self._draining and self.executor is not None:
+            if self.executor is not None:
                 self.executor.shutdown(wait=True)
-                self._draining = False
-                self._maintenance_wakeup.set()
+            self._draining = False
+            self._heartbeat_wakeup.set()
+            self._maintenance_wakeup.set()
+            heartbeat_thread.join(timeout=5)
             maintenance_thread.join(timeout=5)
             self._cleanup_worker_state()
 
@@ -468,11 +505,13 @@ class Worker:
             # 时调用 stop；此时仍需唤醒 maintenance 并保持停止信号。
             self._shutdown_event.set()
             self._maintenance_wakeup.set()
+            self._heartbeat_wakeup.set()
             return
         logger.info(f"Worker 正在停止: {self.worker_id} reason={reason}")
+        # 同步 handler 或线程池仍有活动任务时，心跳必须持续到 drain 完成。
+        with self._active_claims_lock:
+            self._draining = self.executor is not None or bool(self._active_claims)
         self.running = False
-        # executor 仍有活动任务时，maintenance 必须继续刷新 heartbeat/lease，直到 drain 完成。
-        if self.executor is not None:
-            self._draining = True
         self._shutdown_event.set()
         self._maintenance_wakeup.set()
+        self._heartbeat_wakeup.set()

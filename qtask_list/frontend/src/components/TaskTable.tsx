@@ -104,24 +104,33 @@ export function TaskTable({
   const [rows, setRows] = useState<TaskRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [scanLimited, setScanLimited] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const queryOptions = (cursor?: string) => ({
+    queue: queue ?? "",
+    state: filters.state,
+    search: filters.search || undefined,
+    limit,
+    cursor,
+    createdAfter: toUnix(filters.createdAfter ?? ""),
+    createdBefore: toUnix(filters.createdBefore ?? ""),
+    completedAfter: toUnix(filters.completedAfter ?? ""),
+    completedBefore: toUnix(filters.completedBefore ?? ""),
+  });
 
   useEffect(() => {
     let stopped = false;
     const load = async () => {
       if (!queue) return;
       try {
-        const data = await api.queueTasks({
-          queue,
-          state: filters.state,
-          search: filters.search || undefined,
-          limit,
-          createdAfter: toUnix(filters.createdAfter ?? ""),
-          createdBefore: toUnix(filters.createdBefore ?? ""),
-          completedAfter: toUnix(filters.completedAfter ?? ""),
-          completedBefore: toUnix(filters.completedBefore ?? ""),
-        });
+        const data = await api.queueTasks(queryOptions());
         if (stopped) return;
         setRows(data.tasks);
+        setNextCursor(data.next_cursor ?? null);
+        setScanLimited(Boolean(data.scan_limited));
         setError(null);
       } catch (e) {
         if (!stopped) setError(e instanceof Error ? e.message : String(e));
@@ -132,7 +141,8 @@ export function TaskTable({
     setLoading(true);
     load();
     let timer: number | undefined;
-    if (autoRefresh && filters.state !== "history") {
+    const pagedState = ["all", "history", "completed", "failed", "skipped", "cancelled"].includes(filters.state);
+    if (autoRefresh && !pagedState) {
       timer = window.setInterval(() => {
         if (!document.hidden) load();
       }, 5000);
@@ -141,7 +151,23 @@ export function TaskTable({
       stopped = true;
       if (timer) window.clearInterval(timer);
     };
-  }, [queue, filters.state, filters.search, filters.createdAfter, filters.createdBefore, filters.completedAfter, filters.completedBefore, limit, reloadKey, autoRefresh]);
+  }, [queue, filters.state, filters.search, filters.createdAfter, filters.createdBefore, filters.completedAfter, filters.completedBefore, limit, reloadKey, autoRefresh, retryKey]);
+
+  const loadMore = async () => {
+    if (!queue || !nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await api.queueTasks(queryOptions(nextCursor));
+      setRows((current) => [...(current ?? []), ...data.tasks]);
+      setNextCursor(data.next_cursor ?? null);
+      setScanLimited(Boolean(data.scan_limited));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const actions = useMemo(() => {
     const set = new Set<string>();
@@ -153,7 +179,7 @@ export function TaskTable({
 
   if (!queue) return <EmptyInline text="请选择队列" />;
   if (loading && rows === null) return <Skeleton lines={10} height={16} />;
-  if (error) return <ErrorBanner error={error} onRetry={() => onLimitChange(limit)} />;
+  if (error) return <ErrorBanner error={error} onRetry={() => setRetryKey((key) => key + 1)} />;
 
   return (
     <>
@@ -162,6 +188,7 @@ export function TaskTable({
           本页 action：{actions.join("、")}
         </div>
       )}
+      <button className="btn" style={{ marginBottom: 6 }} onClick={() => setRetryKey((key) => key + 1)}>刷新</button>
       <div className="table-wrap">
         <table className="tbl">
           <thead>
@@ -198,10 +225,11 @@ export function TaskTable({
           <div style={{ padding: 24 }}>{emptyHint ?? `该筛选下没有任务。`}</div>
         )}
       </div>
-      {rows !== null && rows.length >= limit && limit < 500 && (
+      {scanLimited && <div className="muted" style={{ marginTop: 8 }}>本页已达到扫描上限，可继续搜索。</div>}
+      {(nextCursor || (rows !== null && rows.length >= limit && limit < 500)) && (
         <div style={{ marginTop: 10 }}>
-          <button className="btn" onClick={() => onLimitChange(limit + 50)} disabled={loading}>
-            {loading ? "加载中…" : `加载更多（已显示 ${rows.length} 条）`}
+          <button className="btn" onClick={nextCursor ? loadMore : () => onLimitChange(limit + 50)} disabled={loading || loadingMore}>
+            {loading || loadingMore ? "加载中…" : `加载更多（已显示 ${rows?.length ?? 0} 条）`}
           </button>
         </div>
       )}

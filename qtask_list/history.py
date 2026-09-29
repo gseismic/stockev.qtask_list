@@ -167,6 +167,50 @@ class TaskHistory:
             pipe.zrem(self.idx_key, *task_ids)
             pipe.execute()
 
+    def clear_terminal(self) -> int:
+        """仅删除无 operational message 的终态记录，保留并发新投递的审计。"""
+        script = r"""
+        local kind = redis.call('TYPE', KEYS[1])
+        if type(kind) == 'table' then kind = kind['ok'] end
+        if kind == 'none' then return redis.call('ZREM', KEYS[2], ARGV[1]) end
+        if kind == 'string' then
+            local ok, record = pcall(cjson.decode, redis.call('GET', KEYS[1]))
+            if ok and type(record) == 'table' then
+                local status = record['outcome'] or ''
+                if status == '' then status = record['status'] or '' end
+                if status == 'completed' or status == 'failed' or
+                   status == 'skipped' or status == 'cancelled' then
+                    redis.call('DEL', KEYS[1])
+                    return redis.call('ZREM', KEYS[2], ARGV[1])
+                end
+            end
+            return 0
+        end
+        if kind ~= 'hash' then return 0 end
+        local outcome = redis.call('HGET', KEYS[1], 'outcome') or ''
+        local operational = redis.call('HGET', KEYS[1], 'operational_message') or '1'
+        if (outcome == 'completed' or outcome == 'failed' or
+            outcome == 'skipped' or outcome == 'cancelled') and operational == '0' then
+            redis.call('DEL', KEYS[1])
+            return redis.call('ZREM', KEYS[2], ARGV[1])
+        end
+        return 0
+        """
+        removed = 0
+        offset = 0
+        while True:
+            task_ids = self.r.zrange(self.idx_key, offset, offset + 499)
+            if not task_ids:
+                break
+            batch_removed = 0
+            for task_id in task_ids:
+                batch_removed += int(self.r.eval(
+                    script, 2, f"{self.task_key_prefix}{task_id}", self.idx_key, task_id
+                ) or 0)
+            removed += batch_removed
+            offset += len(task_ids) - batch_removed
+        return removed
+
     def clean_expired(self, ttl_seconds: Optional[int] = None) -> int:
         """只清理终态且不再有 operational message 的到期记录。"""
         retention = self.ttl_seconds if ttl_seconds is None else max(int(ttl_seconds), 0)

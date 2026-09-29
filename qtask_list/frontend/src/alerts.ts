@@ -75,9 +75,9 @@ export class AlertEngine {
           locate: { page: "queue", queue: name, state: "dlq" },
         });
       }
-      const done = (stats.completed ?? 0) + (stats.failed ?? 0);
-      if (done >= 20 && (stats.failed ?? 0) / done > FAILED_RATIO) {
-        const pct = Math.round(((stats.failed ?? 0) / done) * 100);
+      const done = (stats.completed_total ?? 0) + (stats.failed_total ?? 0);
+      if (done >= 20 && (stats.failed_total ?? 0) / done > FAILED_RATIO) {
+        const pct = Math.round(((stats.failed_total ?? 0) / done) * 100);
         this.fire(`failedratio:${name}`, {
           key: `failedratio:${name}`,
           rule: "failedratio",
@@ -184,8 +184,8 @@ export class AlertEngine {
       const stats = item as unknown as Record<string, number>;
       const name = String(item.name);
       if ((stats.dlq ?? 0) > 0) validKeys.add(`dlq:${name}`);
-      const done = (stats.completed ?? 0) + (stats.failed ?? 0);
-      if (done >= 20 && (stats.failed ?? 0) / done > FAILED_RATIO) validKeys.add(`failedratio:${name}`);
+      const done = (stats.completed_total ?? 0) + (stats.failed_total ?? 0);
+      if (done >= 20 && (stats.failed_total ?? 0) / done > FAILED_RATIO) validKeys.add(`failedratio:${name}`);
       if ((stats.stale_workers ?? 0) > 0) validKeys.add(`stale:${name}`);
       if ((stats.queue ?? 0) > READY_THRESHOLD) validKeys.add(`ready:${name}`);
       if ((stats.deadline_missed ?? 0) > 0) validKeys.add(`expired:${name}`);

@@ -85,7 +85,7 @@ export function OverviewPage() {
             <KpiCard
               label="总剩余"
               value={fmtInt(totalRemaining)}
-              hint="ready+processing+retry_wait+delay"
+              hint="ready+processing+retry+delay"
               onClick={() => navigate("/queues?filter=active")}
             />
             <KpiCard
@@ -197,6 +197,7 @@ export function OverviewPage() {
                         {(r.stats.dlq ?? 0) > 0 && <span className="badge c-danger">DLQ {r.stats.dlq}</span>}
                         {(r.stats.stale_workers ?? 0) > 0 && <span className="badge c-danger">失联 {r.stats.stale_workers}</span>}
                         {(r.stats.deadline_missed ?? 0) > 0 && <span className="badge c-warning">过期 {r.stats.deadline_missed}</span>}
+                        {r.stats.observation_indexed === 0 && <span className="badge c-warning" title="旧队列需运行 rebuild-observation 回填监控索引">指标需回填</span>}
                         {!r.abnormal && r.progress.remaining > 0 && <span className="badge c-primary">进行中</span>}
                         {!r.abnormal && r.progress.remaining === 0 && <span className="badge c-success">空闲</span>}
                       </span>

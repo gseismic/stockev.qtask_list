@@ -297,7 +297,7 @@ export function QueueDetailPage() {
         confirmKeyword={queueName}
         confirmText="清空"
         busy={busy}
-        body={<p>将清空 ready/retry/delay/dlq 中所有消息（含 DLQ，不含历史）。此操作不可恢复。</p>}
+        body={<p>将清空 ready/retry/delay/dlq 中所有消息，保留 processing 与历史。此操作不可恢复。</p>}
         onCancel={() => setConfirm(null)}
         onConfirm={() => runOp(() => api.clearQueue(queueName, true, false, false))}
       />

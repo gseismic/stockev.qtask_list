@@ -7,13 +7,16 @@ export interface QueueStats {
   delay: number;
   history: number;
   completed: number;
+  completed_total: number;
   failed: number;
+  failed_total: number;
   skipped: number;
   cancelled: number;
   deadline_missed: number;
   expired: number;
   active_workers: number;
   stale_workers: number;
+  observation_indexed?: number;
 }
 
 export interface QueueInfo {

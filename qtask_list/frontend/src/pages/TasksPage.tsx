@@ -139,7 +139,6 @@ export function TasksPage() {
         <GlobalTaskTable
           filters={filters}
           limit={limit}
-          onLimitChange={setLimit}
           onOpenTask={(t) => t.task_id && setOpenTask(t)}
           reloadKey={reloadKey}
         />
@@ -160,34 +159,43 @@ export function TasksPage() {
 function GlobalTaskTable({
   filters,
   limit,
-  onLimitChange,
   onOpenTask,
   reloadKey,
 }: {
   filters: TaskFilters;
   limit: number;
-  onLimitChange: (n: number) => void;
   onOpenTask: (t: TaskRow) => void;
   reloadKey: number;
 }) {
   const [rows, setRows] = useState<TaskRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [scanLimited, setScanLimited] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const queryFor = (cursor?: string) => {
+    const query = new URLSearchParams({
+      status: filters.state === "all" ? "" : filters.state,
+      search: filters.search,
+      limit: String(limit),
+    });
+    if (!query.get("status")) query.delete("status");
+    if (cursor) query.set("cursor", cursor);
+    return query;
+  };
 
   useEffect(() => {
     let stopped = false;
     const load = async () => {
       try {
-        const query = new URLSearchParams({
-          status: filters.state === "all" ? "" : filters.state,
-          search: filters.search,
-          limit: String(limit),
-        });
-        if (!query.get("status")) query.delete("status");
-        const data = await fetch(`/api/tasks?${query.toString()}`).then((r) => r.json());
+        const data = await fetch(`/api/tasks?${queryFor().toString()}`).then((r) => r.json());
         if (stopped) return;
         if (data.detail) throw new Error(String(data.detail));
         setRows(data.tasks);
+        setNextCursor(data.next_cursor ?? null);
+        setScanLimited(Boolean(data.scan_limited));
         setError(null);
       } catch (e) {
         if (!stopped) setError(e instanceof Error ? e.message : String(e));
@@ -197,19 +205,35 @@ function GlobalTaskTable({
     };
     setLoading(true);
     load();
-    const timer = window.setInterval(() => {
-      if (!document.hidden) load();
-    }, 8000);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
     };
-  }, [filters.state, filters.search, limit, reloadKey]);
+  }, [filters.state, filters.search, limit, reloadKey, retryKey]);
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const data = await fetch(`/api/tasks?${queryFor(nextCursor).toString()}`).then((r) => r.json());
+      if (data.detail) throw new Error(String(data.detail));
+      setRows((current) => [...(current ?? []), ...data.tasks]);
+      setNextCursor(data.next_cursor ?? null);
+      setScanLimited(Boolean(data.scan_limited));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   if (loading && rows === null) return <Skeleton lines={10} height={16} />;
-  if (error) return <ErrorBanner error={error} onRetry={() => onLimitChange(limit)} />;
+  if (error) return <ErrorBanner error={error} onRetry={() => setRetryKey((key) => key + 1)} />;
   return (
     <div className="table-wrap">
+      <div style={{ padding: "8px 12px" }}>
+        <button className="btn" onClick={() => setRetryKey((key) => key + 1)}>刷新搜索</button>
+      </div>
       <table className="tbl">
         <thead>
           <tr>
@@ -233,10 +257,11 @@ function GlobalTaskTable({
         </tbody>
       </table>
       {rows !== null && rows.length === 0 && <div style={{ padding: 24 }} className="muted">没有匹配的任务。</div>}
-      {rows !== null && rows.length >= limit && limit < 500 && (
+      {scanLimited && <div className="muted" style={{ padding: "8px 12px" }}>本页已达到扫描上限，可继续搜索。</div>}
+      {nextCursor && (
         <div style={{ padding: "10px 12px" }}>
-          <button className="btn" onClick={() => onLimitChange(limit + 50)}>
-            加载更多（已显示 {rows.length} 条）
+          <button className="btn" onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? "加载中…" : `继续搜索（已显示 ${rows?.length ?? 0} 条）`}
           </button>
         </div>
       )}

@@ -42,6 +42,7 @@ export const api = {
     state: string;
     search?: string;
     limit?: number;
+    cursor?: string;
     createdAfter?: number;
     createdBefore?: number;
     completedAfter?: number;
@@ -49,6 +50,7 @@ export const api = {
   }) => {
     const params = new URLSearchParams({ state: opts.state, limit: String(opts.limit ?? 50) });
     if (opts.search) params.set("search", opts.search);
+    if (opts.cursor) params.set("cursor", opts.cursor);
     if (opts.createdAfter) params.set("created_after", String(opts.createdAfter));
     if (opts.createdBefore) params.set("created_before", String(opts.createdBefore));
     if (opts.completedAfter) params.set("completed_after", String(opts.completedAfter));

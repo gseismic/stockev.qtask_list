@@ -49,3 +49,9 @@
 - 计划文件：`PLAN-019-root-consolidation-pnpm.md`
 - 结果文件：`PLAN-019-root-consolidation-pnpm-OUTCOME.md`
 - 摘要：仓库收敛为单包结构（cli/dashboard/remote_storage/frontend 并入 qtask_list/，根目录 15 项→9 项）；删除冗余 requirements.txt；前端切换 pnpm（pnpm-lock.yaml 入库、packageManager 字段、esbuild 构建白名单）；同步 import/入口点/打包配置/示例模块路径/README/skills/HANDOFF。pytest 119 passed，ruff/mypy/pnpm build/uvicorn 登录冒烟通过。
+
+## 2026-09-29 08:16
+
+- 计划文件：`PLAN-020-review-remediation.md`
+- 结果文件：`PLAN-020-review-remediation-OUTCOME.md`
+- 摘要：修复全代码设计评审的 Worker 心跳与领取后租约、RemoteStorage 安全与终态回收、活跃任务管理删除、总览查询成本、跨队列游标搜索、前端剩余量和速率、公开 Dashboard 启动路径；补充旧队列指标回填与批量投递部分成功契约。Python 编译、ruff、mypy、前端构建和 diff 检查通过；本次未执行运行时测试。

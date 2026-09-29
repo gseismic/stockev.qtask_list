@@ -3,6 +3,7 @@ import type { QueueInfo } from "./types";
 export interface Sample {
   ts: number;
   completed: number;
+  observationIndexed: number;
 }
 
 export interface QueueProgress {
@@ -17,7 +18,7 @@ export interface QueueProgress {
 const WINDOW_MS = 60 * 60 * 1000;
 
 function remainingOf(stats: Record<string, number>): number {
-  return (stats.queue ?? 0) + (stats.processing ?? 0) + (stats.retry_wait ?? 0) + (stats.delay ?? 0);
+  return (stats.queue ?? 0) + (stats.processing ?? 0) + (stats.retry ?? 0) + (stats.delay ?? 0);
 }
 
 export class RateSampler {
@@ -30,7 +31,11 @@ export class RateSampler {
       const name = String(item.name);
       seen.add(name);
       const arr = this.samples.get(name) ?? [];
-      arr.push({ ts: now, completed: Number(item.completed ?? 0) });
+      const completed = Number(item.completed_total ?? 0);
+      const observationIndexed = Number(item.observation_indexed ?? 0);
+      if (arr.length && (completed < arr[arr.length - 1].completed ||
+        observationIndexed !== arr[arr.length - 1].observationIndexed)) arr.length = 0;
+      arr.push({ ts: now, completed, observationIndexed });
       while (arr.length > 0 && now - arr[0].ts > WINDOW_MS + 5 * 60 * 1000) arr.shift();
       this.samples.set(name, arr);
     }

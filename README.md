@@ -159,6 +159,8 @@ if result.accepted:
 
 `TaskSpec` 的 `scheduled_for`、`not_before_at`、`start_deadline_at` 和 `dedup_until` 必须使用带时区的 `datetime`。旧 `push()`/`push_batch()` 仍可使用，但会发出兼容层弃用提醒。
 
+`enqueue_many()` 按顺序逐项提交；中途异常会抛出 `BatchEnqueueError`，其 `index` 是失败项下标，`results` 是此前已经完成的结果前缀。批次不是跨任务事务。
+
 **消费端 API：**
 
 ```python
@@ -180,24 +182,25 @@ q.recover()        # Crash recovery: processing → 主队列
 q.move_retry()     # 迁移 V1 retry List；V2 retry_wait 由 move_delay() 到点迁移
 q.move_delay()     # delay 到期 → 主队列 (Lua 原子操作，单次最多 500 条)
 q.requeue_dlq()    # DLQ replay 为新 task_id；V1 无 V2 描述时才原地兼容迁移
-q.clear()          # 清空所有子队列
+q.clear()          # 清空 ready/retry/delay/dlq；默认保留 processing
 q.get_stats()      # 返回 queue/processing/retry/retry_wait/dlq/delay 等计数
 ```
 
 **关键设计决策：**
 
 - `pop()` 使用 `BRPOPLPUSH`（非 `BLPOP`），取任务的同时推入 `processing` 队列。Worker 使用带 heartbeat 的专属 processing key，只自动恢复已失联 Worker 的任务。
-- 重试退避：`fail()` 未耗尽重试次数时按 `retry_backoff_base * 2^(attempt-1)`（±10% 抖动，上限 `retry_backoff_max`）写入 delay ZSET，到点由 `move_delay()` 迁回主队列。`QueueAdmin.queue_stats()` 的 `retry_wait` 统计该 ZSET 中 `delay_reason=retry` 的任务；V1 retry List 仅由 `move_retry()` 兼容迁移。运行次数在信封头和任务记录的 `attempt` 中维护，不再污染业务 payload。
+- 重试退避：`fail()` 未耗尽重试次数时按 `retry_backoff_base * 2^(attempt-1)`（±10% 抖动，上限 `retry_backoff_max`）写入 delay ZSET，到点由 `move_delay()` 迁回主队列。`QueueAdmin.queue_stats()` 从状态转换计数读取 `retry_wait`；该值是 `delay` 的子集。V1 retry List 仅由 `move_retry()` 兼容迁移。
 - 执行截止：`TaskSpec.start_deadline_at`（兼容 `push(expire_seconds=...)`）写入任务记录并同步写入 V2 信封；pop/begin-attempt 强制检查，过期任务标记 `skipped`/`deadline_missed`，不进入 DLQ。旧 V1 `expires_at` 仍可读取。
 - `move_delay()` 使用 Redis **Lua 脚本**，原子地将到期任务从 ZSET 迁移到主队列，单次调用最多迁移 500 条，避免同一秒大量任务到期时阻塞 Redis。
 - 大 payload 自动外存：push 时超过 `large_threshold` 则上传到 `RemoteStorage`，队列中仅存引用。消费端未配置 storage 时显式报错进 DLQ（配置错误）；storage 瞬时不可用时任务移入 delay 稍后重试，不进 DLQ。
 
 ### Worker — 任务处理器
 
-**三线程模型：**
+**执行模型：**
 
 - **主线程 (`_worker_loop`)**：循环 pop 任务 → 提交到线程池
 - **线程池 (`ThreadPoolExecutor`)**：并发执行 handler
+- **心跳线程 (`_heartbeat_loop`)**：刷新 Worker 心跳，并续租已经领取及等待线程池执行的任务
 - **维护线程 (`_maintenance_loop`)**：定时健康检查 + 历史归档
 
 ```python
@@ -271,7 +274,8 @@ admin.move_retry("stockev:day-kline:fetch")
 admin.recover("stockev:day-kline:fetch")  # 默认只恢复 stale worker
 
 # 清理、删除和诊断
-admin.clear_queue("stockev:day-kline:fetch", include_history=True)
+admin.clear_queue("stockev:day-kline:fetch")  # 默认保留 processing 与历史
+admin.clear_queue("stockev:day-kline:fetch", include_history=True)  # 无剩余 processing 时可清历史
 admin.clean_history("stockev:day-kline:fetch", ttl_days=15)
 admin.delete_task("<task_id>", queue_name="stockev:day-kline:fetch")
 admin.delete_queue("stockev:day-kline:fetch")  # 删除整条队列及历史，谨慎使用
@@ -283,6 +287,10 @@ admin.diagnose("stockev:day-kline:fetch")
 `expired` 是 `deadline_missed` 的兼容别名：投递时通过 `TaskSpec.start_deadline_at`（或兼容参数 `expire_seconds`）设定最晚开始时间，任务未完成且超过该时间后会出现在过期视图中；`clean-history` / `clean_expired()` 表示历史记录 TTL 清理，二者不是同一件事。
 
 `skipped` 表示任务在 begin-attempt 时已过 `start_deadline_at`，被跳过未执行；`cancelled` 表示被 supersede 或管理操作取消。
+
+跨队列搜索使用 `QueueAdmin.search_tasks_page(queues, search=..., limit=50, cursor=...)`。响应包含 `tasks`、`next_cursor`、`has_more`、`scan_limited`；达到扫描上限时使用游标继续检索。`all` 包含 Redis 中仍保留的终态历史，SQLite 归档不在该搜索范围。`QueueAdmin.list_tasks()` 对筛选条件会继续扫描直到凑足结果或遍历结束。
+
+总览的 `completed_total` 等字段是状态转换累计数，`history` 是当前 Redis 历史索引条数。旧队列需要在暂停投递和消费的维护窗口运行 `qtask rebuild-observation <queue>` 回填截止时间及等待重试索引；界面会标记未回填队列。
 
 DLQ 重放（`admin.requeue_dlq` / `qtask requeue`）创建新的 `task_id`，原失败记录保持不变，并通过 `replay_of` / `replayed_by` 保留血缘；新实例从 `attempt=0` 开始。`reset_retry` 与 CLI `--keep-retry` 仅为兼容参数，V2 replay 不会复活原终态。从活跃 Worker 的 processing 重放会被拒绝，需先执行 recover。
 
@@ -301,21 +309,21 @@ Redis Key 结构:
 
 ### RemoteStorage — 大文件外存
 
-解决 Redis 不适合存储大 payload 的问题：
+解决 Redis 不适合存储大 payload 的问题。新对象使用每任务独占的随机 key：
 
 ```
 push: payload > large_threshold (50KB)
-  → save_bytes(data) → POST /api/storage/upload → 返回 key
-  → 队列中只存 {"_large": true, "key": "xxx"}
+  → POST /api/storage/upload → 返回独占 key 与 storage_id
+  → 队列中只保存外存描述符
 
-pop: 检测到 _large=true
-  → load(key) → GET /api/storage/download/{key} → 还原完整 payload
+pop: 读取外存描述符
+  → GET /api/storage/download/{key} → 校验并还原 payload
 ```
 
 这是一个 HTTP 客户端，需外部存储服务配合。项目内置了一个轻量服务端，可通过 CLI 启动：
 
 ```bash
-qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
+qtask storage --port 8096 --data-dir ~/.qtask-storage --gc-redis redis://localhost:6379/0
 ```
 
 服务端依赖安装：
@@ -323,6 +331,8 @@ qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
 ```bash
 pip install -e ".[storage]"
 ```
+
+服务端默认只监听 `127.0.0.1`；远程访问必须设置 `QTASK_STORAGE_TOKEN`，客户端会自动从同名环境变量读取 Bearer token。通过本机反向代理对外发布时也应设置 token。上传上限由 `QTASK_STORAGE_MAX_BYTES` 配置，默认 64 MiB。队列托管的新对象有 24 小时待入队宽限期，成功入队后在 live 和 DLQ 期间持续保留；终态历史保留期结束后，服务端从任务 Redis 的回收日志删除对象。存储服务必须连接到任务使用的同一个 Redis。旧内容寻址对象仍可读取，但不会按单任务删除；既有对象的旧 TTL 边界仍适用。
 
 ### ArchiveManager + Monitor — 归档与监控
 
@@ -486,8 +496,11 @@ qtask peek stockev_list:fetch --state dlq --json
 # 实时监控 (2 秒刷新)
 qtask watch stockev_list:fetch -i 2
 
-# 清空队列；需要同时删除历史时显式加 --include-history
+# 清空 ready/retry/delay/dlq；默认保留 processing 与历史
 qtask clear stockev_list:fetch --force
+# 无活跃 Worker 时可显式清理失联 processing
+qtask clear stockev_list:fetch --include-processing --force
+# 需要同时删除已终结历史时显式加 --include-history
 qtask clear stockev_list:fetch --include-history --force
 
 # DLQ 重新入队
@@ -525,7 +538,7 @@ qtask archive stockev_list:fetch -d 1
 qtask monitor
 
 # 启动 RemoteStorage 服务端（大 payload 外存）
-qtask storage --port 8096 --data-dir ~/.qtask-storage --ttl-days 7
+qtask storage --port 8096 --data-dir ~/.qtask-storage --gc-redis redis://localhost:6379/0
 
 # 启动 Web Dashboard
 qtask dashboard

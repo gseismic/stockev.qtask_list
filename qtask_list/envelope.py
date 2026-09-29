@@ -32,6 +32,7 @@ class PreparedPayload:
     sha256: str
     external_key: str | None = None
     external_created: bool = False
+    external_dedicated: bool = False
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,12 @@ class EnvelopeCodec:
 
         if self.storage is not None and len(data) > self.large_threshold:
             if hasattr(self.storage, "save"):
-                stored = self.storage.save(data, retain_until=retain_until)
+                save_managed = getattr(self.storage, "save_managed", None)
+                stored = (
+                    save_managed(data, retain_until=retain_until)
+                    if save_managed is not None
+                    else self.storage.save(data, retain_until=retain_until)
+                )
             else:
                 # 兼容只实现旧 save_bytes/load 契约的自定义 storage。
                 try:
@@ -125,13 +131,17 @@ class EnvelopeCodec:
                     "key": stored.key,
                     "size": len(data),
                     "sha256": digest,
-                    "retain_until": retain_until,
+                    "retain_until": stored.retain_until,
+                    "dedicated": bool(getattr(stored, "dedicated", False)),
+                    "storage_id": getattr(stored, "storage_id", None),
+                    "pending": bool(getattr(stored, "pending", False)),
                 },
                 kind="external",
                 size=len(data),
                 sha256=digest,
                 external_key=stored.key,
                 external_created=stored.created,
+                external_dedicated=bool(getattr(stored, "dedicated", False)),
             )
 
         if len(data) > self.compress_threshold:
@@ -382,7 +392,7 @@ class EnvelopeCodec:
 
 
 def prepared_from_descriptor(descriptor: Mapping[str, Any]) -> PreparedPayload:
-    """从历史记录恢复 payload descriptor，供 replay 不下载外存即可克隆。"""
+    """从历史记录恢复 payload descriptor；外存 replay 会下载并独立上传。"""
     kind = str(descriptor.get("kind", ""))
     if kind not in {"inline", "zstd", "external"}:
         raise PayloadDecodeError("invalid_payload_kind", f"未知 payload kind: {kind!r}")
@@ -399,4 +409,5 @@ def prepared_from_descriptor(descriptor: Mapping[str, Any]) -> PreparedPayload:
         sha256=sha256,
         external_key=str(descriptor.get("key")) if kind == "external" else None,
         external_created=False,
+        external_dedicated=bool(descriptor.get("dedicated", False)),
     )
