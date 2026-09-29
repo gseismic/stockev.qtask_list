@@ -55,3 +55,9 @@
 - 计划文件：`PLAN-020-review-remediation.md`
 - 结果文件：`PLAN-020-review-remediation-OUTCOME.md`
 - 摘要：修复全代码设计评审的 Worker 心跳与领取后租约、RemoteStorage 安全与终态回收、活跃任务管理删除、总览查询成本、跨队列游标搜索、前端剩余量和速率、公开 Dashboard 启动路径；补充旧队列指标回填与批量投递部分成功契约。Python 编译、ruff、mypy、前端构建和 diff 检查通过；本次未执行运行时测试。
+
+## 2026-09-29 14:19
+
+- 计划文件：`PLAN-021-review-followup.md`
+- 结果文件：`PLAN-021-review-followup-OUTCOME.md`
+- 摘要：复查并修复 Worker 停机领取/handler 准入竞态、外存 pending 回收与手动删除中断窗口、跨队列游标队列快照、队列详情稀疏筛选无界扫描和旧队列缓存；更新测试基线、README、项目使用指南与前端分页交互。隔离 Redis 全量测试 129 passed，ruff、mypy、pnpm build、diff 检查通过。

@@ -89,6 +89,13 @@ PENDING_GRACE_SECONDS = 86400
 _gc_redis_url = os.environ.get("QTASK_STORAGE_GC_REDIS_URL") or os.environ.get(
     "REDIS_URL", "redis://localhost:6379/0"
 )
+PROMOTE_PENDING_LUA = r"""
+local score = tonumber(redis.call('ZSCORE', KEYS[1], ARGV[1]) or '')
+if not score or (ARGV[3] ~= '1' and score > tonumber(ARGV[2])) then return 0 end
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+return 1
+"""
 _cleanup_thread_started = False
 _cleanup_thread_lock = threading.Lock()
 
@@ -135,55 +142,59 @@ def _storage_id() -> str:
     return value
 
 
+def _promote_pending_gc(
+    client: redis.Redis, storage_id: str, key: str, due_at: float, *, force: bool = False
+) -> bool:
+    """原子撤销待入队资格，并留下可重试的文件回收记录。"""
+    return bool(client.eval(
+        PROMOTE_PENDING_LUA,
+        2,
+        f"{STORAGE_PENDING_KEY}:{storage_id}",
+        f"{STORAGE_GC_KEY}:{storage_id}",
+        key,
+        due_at,
+        "1" if force else "0",
+    ))
+
+
 def _cleanup_storage_gc(batch_size: int = 1000) -> int:
-    """按 Redis 终态清理日志删除任务独占对象；失败项留待下次重试。"""
+    """先把到期待入队对象转入持久回收日志，再删除独占文件。"""
     client = redis.from_url(_gc_redis_url, decode_responses=True)
     removed = 0
     storage_id = _storage_id()
     try:
         redis_seconds, redis_microseconds = client.time()
         due_at = redis_seconds + redis_microseconds / 1_000_000
-        for base_key in (STORAGE_GC_KEY, STORAGE_PENDING_KEY):
-            log_key = f"{base_key}:{storage_id}"
-            due_keys = client.zrangebyscore(log_key, "-inf", due_at, start=0, num=batch_size)
-            for key in due_keys:
-                claim_key = f"{STORAGE_CLAIM_KEY}:{storage_id}:{key}"
-                try:
-                    if base_key == STORAGE_PENDING_KEY:
-                        claimed = client.eval(
-                            """
-                            local score = tonumber(redis.call('ZSCORE', KEYS[1], ARGV[1]) or '')
-                            if not score or score > tonumber(ARGV[2]) then return 0 end
-                            return redis.call('SET', KEYS[2], '1', 'NX', 'EX', 300) and 1 or 0
-                            """,
-                            2, log_key, claim_key, key, due_at,
-                        )
-                        if not claimed:
-                            continue
-                    path = _key_path(key)
-                    meta_path = _meta_path(key)
-                    if not path.exists():
-                        meta_path.unlink(missing_ok=True)
-                        client.zrem(log_key, key)
-                        if base_key == STORAGE_PENDING_KEY:
-                            client.delete(claim_key)
-                        removed += 1
-                        continue
-                    metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-                    if not isinstance(metadata, dict):
-                        raise ValueError("storage metadata must be an object")
-                    if not metadata.get("dedicated"):
-                        logger.warning(f"跳过非独占外存对象的自动删除 key={key}")
-                        client.zrem(log_key, key)
-                        continue
-                    path.unlink(missing_ok=True)
+        pending_key = f"{STORAGE_PENDING_KEY}:{storage_id}"
+        gc_key = f"{STORAGE_GC_KEY}:{storage_id}"
+        due_pending = client.zrangebyscore(pending_key, "-inf", due_at, start=0, num=batch_size)
+        for key in due_pending:
+            # 转移一旦提交，入队脚本就再也看不到 pending；文件删除失败仍可重试。
+            _promote_pending_gc(client, storage_id, key, due_at)
+
+        due_keys = client.zrangebyscore(gc_key, "-inf", due_at, start=0, num=batch_size)
+        for key in due_keys:
+            try:
+                path = _key_path(key)
+                meta_path = _meta_path(key)
+                if not path.exists():
                     meta_path.unlink(missing_ok=True)
-                    client.zrem(log_key, key)
-                    if base_key == STORAGE_PENDING_KEY:
-                        client.delete(claim_key)
+                    client.zrem(gc_key, key)
                     removed += 1
-                except (OSError, ValueError, TypeError) as exc:
-                    logger.warning(f"外存回收失败 key={key}: {exc}")
+                    continue
+                metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+                if not isinstance(metadata, dict):
+                    raise ValueError("storage metadata must be an object")
+                if not metadata.get("dedicated"):
+                    logger.warning(f"跳过非独占外存对象的自动删除 key={key}")
+                    client.zrem(gc_key, key)
+                    continue
+                path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                client.zrem(gc_key, key)
+                removed += 1
+            except (OSError, ValueError, TypeError) as exc:
+                logger.warning(f"外存回收失败 key={key}: {exc}")
     finally:
         client.close()
     return removed
@@ -347,23 +358,27 @@ async def delete(key: str):
         path = _key_path(key)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if not path.exists():
-        raise HTTPException(404, f"key not found: {key}")
-    path.unlink()
-    _meta_path(key).unlink(missing_ok=True)
-    client = None
+    client = redis.from_url(_gc_redis_url, decode_responses=True)
     try:
-        client = redis.from_url(_gc_redis_url, decode_responses=True)
         storage_id = _storage_id()
+        seconds, microseconds = client.time()
+        _promote_pending_gc(
+            client, storage_id, key, seconds + microseconds / 1_000_000, force=True
+        )
+        if not path.exists():
+            _meta_path(key).unlink(missing_ok=True)
+            client.zrem(f"{STORAGE_GC_KEY}:{storage_id}", key)
+            raise HTTPException(404, f"key not found: {key}")
+        path.unlink()
+        _meta_path(key).unlink(missing_ok=True)
         pipe = client.pipeline(transaction=True)
-        pipe.zrem(f"{STORAGE_PENDING_KEY}:{storage_id}", key)
+        pipe.zrem(f"{STORAGE_GC_KEY}:{storage_id}", key)
         pipe.delete(f"{STORAGE_CLAIM_KEY}:{storage_id}:{key}")
         pipe.execute()
-    except (redis.RedisError, ValueError):
-        pass
+    except redis.RedisError as exc:
+        raise HTTPException(503, "storage GC Redis unavailable") from exc
     finally:
-        if client is not None:
-            client.close()
+        client.close()
     logger.info(f"delete: key={key}")
     return {"deleted": key}
 

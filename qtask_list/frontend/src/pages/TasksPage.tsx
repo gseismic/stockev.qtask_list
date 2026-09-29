@@ -256,7 +256,9 @@ function GlobalTaskTable({
           ))}
         </tbody>
       </table>
-      {rows !== null && rows.length === 0 && <div style={{ padding: 24 }} className="muted">没有匹配的任务。</div>}
+      {rows !== null && rows.length === 0 && <div style={{ padding: 24 }} className="muted">
+        {scanLimited ? "本页没有匹配任务，可继续搜索。" : "没有匹配的任务。"}
+      </div>}
       {scanLimited && <div className="muted" style={{ padding: "8px 12px" }}>本页已达到扫描上限，可继续搜索。</div>}
       {nextCursor && (
         <div style={{ padding: "10px 12px" }}>

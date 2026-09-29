@@ -234,7 +234,7 @@ worker.run()
 
 - **信号量背压**：`Semaphore(max_workers * 2)` 限制线程池排队深度，防止任务无限积压。
 - **启动自动 recovery**：`run()` 只恢复 heartbeat 已过期的 `processing:{worker_id}`，避免抢回其他活跃 Worker 正在处理的任务。
-- **优雅停止**：`SIGINT/SIGTERM` 信号 → `stop()`；线程池 drain 期间继续刷新 heartbeat，任务处理完成后再清理 Worker 状态。
+- **优雅停止**：`SIGINT/SIGTERM` 信号 → `stop()`；已准入 handler 的任务在 drain 期间继续刷新 heartbeat，尚未准入的已领取任务退回 ready 并恢复 attempt，最后再清理 Worker 状态。
 - **maintenance_interval**：默认 30 分钟执行一次归档和内存检查。
 
 ### QueueAdmin — 管理接口
@@ -288,7 +288,7 @@ admin.diagnose("stockev:day-kline:fetch")
 
 `skipped` 表示任务在 begin-attempt 时已过 `start_deadline_at`，被跳过未执行；`cancelled` 表示被 supersede 或管理操作取消。
 
-跨队列搜索使用 `QueueAdmin.search_tasks_page(queues, search=..., limit=50, cursor=...)`。响应包含 `tasks`、`next_cursor`、`has_more`、`scan_limited`；达到扫描上限时使用游标继续检索。`all` 包含 Redis 中仍保留的终态历史，SQLite 归档不在该搜索范围。`QueueAdmin.list_tasks()` 对筛选条件会继续扫描直到凑足结果或遍历结束。
+跨队列搜索使用 `QueueAdmin.search_tasks_page(queues=None, search=..., limit=50, cursor=...)`；`queues=None` 在第一页固定当前队列集合，后续游标沿该快照翻页。也可显式传入队列列表。响应包含 `tasks`、`next_cursor`、`has_more`、`scan_limited`；默认每页扫描预算为 5000 条，达到上限时使用游标继续检索。Dashboard 固定使用这个预算。`all` 包含 Redis 中仍保留的终态历史，SQLite 归档不在该搜索范围。`QueueAdmin.list_tasks()` 的筛选扫描最多遍历 5000 条，超过后报错并提示改用分页接口。
 
 总览的 `completed_total` 等字段是状态转换累计数，`history` 是当前 Redis 历史索引条数。旧队列需要在暂停投递和消费的维护窗口运行 `qtask rebuild-observation <queue>` 回填截止时间及等待重试索引；界面会标记未回填队列。
 
@@ -332,7 +332,7 @@ qtask storage --port 8096 --data-dir ~/.qtask-storage --gc-redis redis://localho
 pip install -e ".[storage]"
 ```
 
-服务端默认只监听 `127.0.0.1`；远程访问必须设置 `QTASK_STORAGE_TOKEN`，客户端会自动从同名环境变量读取 Bearer token。通过本机反向代理对外发布时也应设置 token。上传上限由 `QTASK_STORAGE_MAX_BYTES` 配置，默认 64 MiB。队列托管的新对象有 24 小时待入队宽限期，成功入队后在 live 和 DLQ 期间持续保留；终态历史保留期结束后，服务端从任务 Redis 的回收日志删除对象。存储服务必须连接到任务使用的同一个 Redis。旧内容寻址对象仍可读取，但不会按单任务删除；既有对象的旧 TTL 边界仍适用。
+服务端默认只监听 `127.0.0.1`；远程访问必须设置 `QTASK_STORAGE_TOKEN`，客户端会自动从同名环境变量读取 Bearer token。通过本机反向代理对外发布时也应设置 token。上传上限由 `QTASK_STORAGE_MAX_BYTES` 配置，默认 64 MiB。队列托管的新对象有 24 小时待入队宽限期，成功入队后在 live 和 DLQ 期间持续保留；终态历史保留期结束后，服务端从任务 Redis 的回收日志删除对象。到期回收及手动删除都会先在 Redis 撤销待入队资格，再删除文件；删除失败时由回收日志重试。手动删除需要回收 Redis 可用。存储服务必须连接到任务使用的同一个 Redis。旧内容寻址对象仍可读取，但不会按单任务删除；既有对象的旧 TTL 边界仍适用。
 
 ### ArchiveManager + Monitor — 归档与监控
 

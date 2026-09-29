@@ -6,6 +6,9 @@ import pytest
 import redis
 from fastapi.testclient import TestClient
 
+from qtask_list import SmartQueue, TaskSpec
+from qtask_list.admin import QueueAdmin
+from qtask_list.dashboard import main as dashboard_main
 from qtask_list.dashboard.main import app
 
 
@@ -44,6 +47,17 @@ def cleanup(client):
         client.delete(f"qtask:task:{task_id}")
     for key in client.scan_iter("qtask_dash_test:*"):
         client.delete(key)
+    for pattern in ("qtask:metrics:qtask_dash_test:*", "qtask:deadline:qtask_dash_test:*",
+                    "qtask:workers:qtask_dash_test:*"):
+        for key in client.scan_iter(pattern):
+            client.delete(key)
+    for queue in client.zrange("qtask:queues", 0, -1):
+        if queue.startswith("qtask_dash_test:"):
+            client.zrem("qtask:queues", queue)
+    dashboard_main.admin._legacy_queue_cache.clear()
+    dashboard_main.admin._legacy_queue_discovered_at = float("-inf")
+    dashboard_main.admin._legacy_worker_cache.clear()
+    dashboard_main.admin._legacy_worker_discovered_at = float("-inf")
 
 
 def make_msg(task_id: str, payload: dict | None = None) -> str:
@@ -360,6 +374,8 @@ def test_dashboard_queue_stats_includes_completed_failed(client, r):
     })
     r.zadd(f"qtask:hist:{queue}", {"hist-ok": 1, "hist-fail": 2, "hist-pending": 3})
 
+    # 旧历史需显式回填后，累计计数才能用于总览。
+    dashboard_main.admin.rebuild_observation_indexes(queue)
     response = client.get(f"/api/queue/{queue}")
     assert response.status_code == 200
     stats = response.json()["stats"]
@@ -382,6 +398,7 @@ def test_dashboard_queue_stats_supports_legacy_string_history(client, r):
     )
     r.zadd(f"qtask:hist:{queue}", {"legacy-string-task": time.time()})
 
+    dashboard_main.admin.rebuild_observation_indexes(queue)
     response = client.get(f"/api/queue/{queue}")
 
     assert response.status_code == 200
@@ -399,6 +416,7 @@ def test_dashboard_delete_queue(client, r):
         "task_id": "del-hist", "status": "completed",
     })
     r.zadd(f"qtask:hist:{queue}", {"del-hist": 1})
+    r.zadd("qtask:queues", {queue: time.time()})
 
     queues_before = client.get("/api/queues").json()
     assert any(q["name"] == queue for q in queues_before)
@@ -639,6 +657,7 @@ def test_dashboard_queue_stats_includes_expired(client, r):
     r.delete(f"qtask:hist:{queue}")
 
     task_id = seed_expired_tasks(r, queue, 1, "exp-stats")[0]
+    dashboard_main.admin.rebuild_observation_indexes(queue)
 
     response = client.get("/api/queues")
     assert response.status_code == 200
@@ -649,6 +668,62 @@ def test_dashboard_queue_stats_includes_expired(client, r):
 
     r.delete(f"qtask:task:{task_id}")
     r.delete(f"qtask:hist:{queue}")
+
+
+def test_global_search_cursor_keeps_initial_queue_snapshot(client, r):
+    # 翻页之间有新队列入库，旧游标仍沿原查询快照继续。
+    redis_url = "redis://localhost:6379/0"
+    first_queue = SmartQueue(redis_url, "cursor-first", namespace="qtask_dash_test", redis_client=r)
+    first_ids = [
+        first_queue.enqueue(TaskSpec(action="search", payload={"index": index})).task_id
+        for index in range(2)
+    ]
+    page1 = client.get("/api/tasks", params={"limit": 1})
+    assert page1.status_code == 200
+    cursor = page1.json()["next_cursor"]
+    assert cursor
+
+    second_queue = SmartQueue(redis_url, "cursor-second", namespace="qtask_dash_test", redis_client=r)
+    second_queue.enqueue(TaskSpec(action="search", payload={"index": 99}))
+    page2 = client.get("/api/tasks", params={"limit": 1, "cursor": cursor})
+    assert page2.status_code == 200
+    assert page2.json()["tasks"][0]["task_id"] in first_ids
+    assert page2.json()["tasks"][0]["_queue"] == first_queue.base
+
+
+def test_search_rejects_malformed_cursor_as_client_error(client, r):
+    # 不可信游标即使能解码为 JSON，也不能触发服务端异常。
+    assert client.get("/api/tasks", params={"cursor": "W10"}).status_code == 400
+
+
+def test_sparse_queue_search_is_bounded_and_resumable(client, r):
+    # retry_wait 稀疏筛选每次只扫描上限内的记录，下一页继续剩余历史。
+    queue = "qtask_dash_test:sparse-search"
+    pipe = r.pipeline(transaction=False)
+    for index in range(5001):
+        task_id = f"sparse-{index}"
+        pipe.hset(f"qtask:task:{task_id}", mapping={
+            "task_id": task_id, "action": "test", "outcome": "completed",
+            "created_at": str(1000 + index), "location": "history",
+        })
+        pipe.zadd(f"qtask:hist:{queue}", {task_id: 1000 + index})
+    pipe.execute()
+
+    first = client.get(f"/api/queue/{queue}/tasks", params={"state": "retry_wait", "limit": 1})
+    assert first.status_code == 200
+    assert first.json()["scanned"] == 5000
+    assert first.json()["scan_limited"] is True
+    assert first.json()["next_cursor"]
+    second = client.get(f"/api/queue/{queue}/tasks", params={
+        "state": "retry_wait", "limit": 1, "cursor": first.json()["next_cursor"],
+    })
+    assert second.status_code == 200
+    assert second.json()["scanned"] == 1
+    assert second.json()["has_more"] is False
+    with pytest.raises(ValueError, match="search_tasks_page"):
+        QueueAdmin(redis_url="redis://localhost:6379/0", redis_client=r).list_tasks(
+            queue, state="retry_wait", limit=1
+        )
 
 
 def test_dashboard_list_completed_tasks(client, r):

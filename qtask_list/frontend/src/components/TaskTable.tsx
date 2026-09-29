@@ -108,6 +108,10 @@ export function TaskTable({
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [scanLimited, setScanLimited] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
+  const pagedState = [
+    "all", "history", "completed", "failed", "skipped", "cancelled",
+    "retry_wait", "deadline_missed", "expired",
+  ].includes(filters.state);
 
   const queryOptions = (cursor?: string) => ({
     queue: queue ?? "",
@@ -141,7 +145,6 @@ export function TaskTable({
     setLoading(true);
     load();
     let timer: number | undefined;
-    const pagedState = ["all", "history", "completed", "failed", "skipped", "cancelled"].includes(filters.state);
     if (autoRefresh && !pagedState) {
       timer = window.setInterval(() => {
         if (!document.hidden) load();
@@ -222,11 +225,13 @@ export function TaskTable({
           </tbody>
         </table>
         {rows !== null && rows.length === 0 && (
-          <div style={{ padding: 24 }}>{emptyHint ?? `该筛选下没有任务。`}</div>
+          <div style={{ padding: 24 }}>
+            {scanLimited ? "本页没有匹配任务，可继续搜索。" : (emptyHint ?? "该筛选下没有任务。")}
+          </div>
         )}
       </div>
       {scanLimited && <div className="muted" style={{ marginTop: 8 }}>本页已达到扫描上限，可继续搜索。</div>}
-      {(nextCursor || (rows !== null && rows.length >= limit && limit < 500)) && (
+      {(nextCursor || (!pagedState && rows !== null && rows.length >= limit && limit < 500)) && (
         <div style={{ marginTop: 10 }}>
           <button className="btn" onClick={nextCursor ? loadMore : () => onLimitChange(limit + 50)} disabled={loading || loadingMore}>
             {loading || loadingMore ? "加载中…" : `加载更多（已显示 ${rows?.length ?? 0} 条）`}

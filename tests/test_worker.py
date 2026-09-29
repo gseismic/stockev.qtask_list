@@ -1,7 +1,9 @@
 import pytest
 import time
+import threading
 import redis
-from qtask_list import Worker, SmartQueue
+from datetime import datetime, timedelta, timezone
+from qtask_list import Worker, SmartQueue, TaskSpec
 
 
 @pytest.fixture
@@ -139,6 +141,136 @@ class TestWorkerConcurrency:
 
 
 class TestWorkerLifecycle:
+
+    def test_stop_before_run_is_not_lost(self, redis_url, r):
+        worker = Worker(redis_url, "stopped_before_start", namespace="testns")
+        called = threading.Event()
+
+        @worker.on("test")
+        def handler(payload):
+            called.set()
+
+        task_id = worker.queue.enqueue(TaskSpec(action="test", payload={})).task_id
+        worker.stop(reason="before_start")
+        worker.run()
+        assert not called.is_set()
+        assert r.llen(worker.queue.queue) == 1
+        assert r.hget(f"qtask:task:{task_id}", "attempt") == "0"
+
+    def test_stop_during_handler_lookup_returns_unadmitted_claim(self, redis_url, r):
+        # 领取后到 handler 准入前的竞态，也必须退回任务而不开始调用。
+        worker = Worker(redis_url, "stop_during_lookup", namespace="testns", worker_id="stop-lookup")
+        entered = threading.Event()
+        proceed = threading.Event()
+        handler_called = threading.Event()
+
+        @worker.on("test")
+        def handler(payload):
+            handler_called.set()
+
+        class PausingHandlers(dict):
+            def get(self, key, default=None):
+                entered.set()
+                if not proceed.wait(5):
+                    raise TimeoutError("test did not release handler lookup")
+                return super().get(key, default)
+
+        worker.handlers = PausingHandlers(worker.handlers)
+        task_id = worker.queue.enqueue(TaskSpec(action="test", payload={})).task_id
+        runner = threading.Thread(target=worker.run)
+        runner.start()
+        try:
+            assert entered.wait(5)
+            worker.stop(reason="test")
+            proceed.set()
+            runner.join(5)
+            assert not runner.is_alive()
+            assert not handler_called.is_set()
+            assert r.hget(f"qtask:task:{task_id}", "attempt") == "0"
+            assert r.llen(worker.queue.queue) == 1
+            assert r.llen(worker.queue.processing) == 0
+        finally:
+            proceed.set()
+            worker.stop(reason="test_cleanup")
+            runner.join(5)
+
+    def test_stop_during_blocking_pop_returns_claim_without_running_handler(self, redis_url, r):
+        # 停机发生在阻塞领取期间：保持心跳，退回 claim，并恢复 attempt 与租约。
+        worker = Worker(
+            redis_url, "stop_during_pop", namespace="testns",
+            worker_id="stop-during-pop", heartbeat_ttl=2,
+        )
+        entered = threading.Event()
+        proceed = threading.Event()
+        handler_called = threading.Event()
+        original_pop = worker.queue.pop_claim
+
+        def held_pop(*args, **kwargs):
+            entered.set()
+            if not proceed.wait(6):
+                raise TimeoutError("test did not release pop")
+            return original_pop(*args, **kwargs)
+
+        worker.queue.pop_claim = held_pop
+
+        @worker.on("test")
+        def handler(payload):
+            handler_called.set()
+
+        runner = threading.Thread(target=worker.run)
+        runner.start()
+        try:
+            assert entered.wait(5)
+            worker.stop(reason="test")
+            task_id = worker.queue.enqueue(TaskSpec(
+                action="test", payload={"value": 1}, concurrency_key="same",
+                start_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+            )).task_id
+            time.sleep(2.2)
+            assert r.exists(worker._heartbeat_key) == 1
+            proceed.set()
+            runner.join(5)
+            assert not runner.is_alive()
+            assert not handler_called.is_set()
+            assert r.llen(worker.queue.queue) == 1
+            assert r.llen(worker.queue.processing) == 0
+            assert r.hget(f"qtask:task:{task_id}", "attempt") == "0"
+            assert r.zscore(worker.queue.deadline_key, task_id) is not None
+            assert r.exists(worker.queue._lease_key("same")) == 0
+        finally:
+            proceed.set()
+            runner.join(5)
+
+    def test_stop_keeps_heartbeat_until_running_handler_finishes(self, redis_url, r):
+        # 已进入 handler 的任务在 drain 期间持续受到 heartbeat 保护。
+        worker = Worker(
+            redis_url, "running_drain", namespace="testns",
+            worker_id="running-drain", heartbeat_ttl=2,
+        )
+        started = threading.Event()
+        finish = threading.Event()
+
+        @worker.on("test")
+        def handler(payload):
+            started.set()
+            assert finish.wait(6)
+
+        task_id = worker.queue.enqueue(TaskSpec(action="test", payload={})).task_id
+        runner = threading.Thread(target=worker.run)
+        runner.start()
+        try:
+            assert started.wait(5)
+            worker.stop(reason="test")
+            time.sleep(2.2)
+            assert r.exists(worker._heartbeat_key) == 1
+            finish.set()
+            runner.join(5)
+            assert not runner.is_alive()
+            assert r.hget(f"qtask:task:{task_id}", "outcome") == "completed"
+        finally:
+            finish.set()
+            worker.stop(reason="test_cleanup")
+            runner.join(5)
 
     def test_worker_start_stop(self, redis_url, r):
         worker = Worker(redis_url, "lifecycle_test", namespace="testns")

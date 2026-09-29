@@ -231,7 +231,8 @@ def api_queue_tasks(
     _auth: None = Depends(require_auth),
 ):
     if search or state in {QueueState.all, QueueState.history, QueueState.completed,
-                 QueueState.failed, QueueState.skipped, QueueState.cancelled}:
+                 QueueState.failed, QueueState.skipped, QueueState.cancelled,
+                 QueueState.retry_wait, QueueState.deadline_missed, QueueState.expired}:
         try:
             page = admin.search_tasks_page(
                 [name], state=state, search=search, limit=limit, cursor=cursor,
@@ -389,7 +390,7 @@ def api_tasks(
     cursor: Optional[str] = Query(None, description="Search cursor"),
     _auth: None = Depends(require_auth),
 ):
-    queues = [queue] if queue else admin.queue_names()
+    queues = [queue] if queue else None
     selected_state = QueueState(status) if status in QueueState._value2member_map_ else QueueState.all
     try:
         page = admin.search_tasks_page(

@@ -39,6 +39,7 @@ from .state import (
     RELEASE_LEASE_LUA,
     RENEW_LEASE_LUA,
     REPLAY_TASK_LUA,
+    RETURN_UNSTARTED_CLAIM_LUA,
     RETRY_TASK_LUA,
 )
 from .storage import RemoteStorage
@@ -1029,6 +1030,24 @@ class SmartQueue:
                 int(self.concurrency_lease_seconds * 1000),
             )
         )
+
+    def return_unstarted_claim(self, claim: TaskClaim) -> bool:
+        """停机时原子退回尚未进入 handler 的 claim，并恢复执行预算。"""
+        response = self.r.eval(
+            RETURN_UNSTARTED_CLAIM_LUA,
+            6,
+            self.processing,
+            self.queue,
+            f"qtask:task:{claim.context.task_id}",
+            self.deadline_key,
+            claim.lease_key or self._dummy_key("lease", claim.context.task_id),
+            self.metrics_key,
+            claim.raw_message,
+            claim.context.task_id,
+            claim.context.attempt,
+            claim.lease_token or "",
+        )
+        return str(response[0]) == "returned"
 
     def release_claim_lease(self, claim: TaskClaim) -> bool:
         """显式释放 lease；正常 ack/fail 已在状态脚本内完成。"""

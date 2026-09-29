@@ -98,6 +98,8 @@ class Worker:
         self._semaphore = threading.Semaphore(max_workers * 2) if max_workers > 1 else None
 
         self._shutdown_event = threading.Event()
+        # stop 与 handler 准入在此确定先后；不在持锁期间运行 handler。
+        self._handler_start_lock = threading.Lock()
         # maintenance 线程只用该事件唤醒/退出；停止事件专门提供给 TaskContext，
         # 不能因为维护线程轮询而清除，否则 handler 会丢失 stop_requested 信号。
         self._maintenance_wakeup = threading.Event()
@@ -186,10 +188,16 @@ class Worker:
 
     def _process_task(self, claim: TaskClaim) -> None:
         """执行 handler，并把分类错误映射到统一状态转换。"""
-        started_monotonic = time.monotonic()
         claim = claim.with_stop_event(self._shutdown_event)
         action = claim.context.action
         handler = self.handlers.get(action)
+        with self._handler_start_lock:
+            stop_requested = self._shutdown_event.is_set()
+        if stop_requested:
+            if not self.queue.return_unstarted_claim(claim):
+                logger.warning(f"Stopped claim was already moved task={claim.context.task_id}")
+            return
+        started_monotonic = time.monotonic()
         if handler is None:
             logger.warning(f"No handler for action: {action}")
             self.queue.fail(
@@ -462,9 +470,11 @@ class Worker:
 
     def run(self) -> None:
         """启动 Worker；优雅停止期间继续 heartbeat 和 lease 续租。"""
-        self.running = True
-        self._draining = False
-        self._shutdown_event.clear()
+        with self._handler_start_lock:
+            if self._shutdown_event.is_set():
+                return
+            self.running = True
+            self._draining = False
         self._maintenance_wakeup.clear()
         self._heartbeat_wakeup.clear()
         if threading.current_thread() is threading.main_thread():
@@ -500,18 +510,15 @@ class Worker:
 
     def stop(self, reason: str = "unknown") -> None:
         """请求 Worker 停止；TaskContext 会立即观察到 stop_requested。"""
-        if not self.running:
-            # run() 的 finally 也可能在 worker_loop 已经观察到 running=False
-            # 时调用 stop；此时仍需唤醒 maintenance 并保持停止信号。
+        with self._handler_start_lock:
+            was_running = self.running
+            if was_running:
+                # 阻塞领取可能在 stop 之后返回；心跳覆盖该窗口和后续 drain。
+                with self._active_claims_lock:
+                    self._draining = True
+                self.running = False
             self._shutdown_event.set()
-            self._maintenance_wakeup.set()
-            self._heartbeat_wakeup.set()
-            return
-        logger.info(f"Worker 正在停止: {self.worker_id} reason={reason}")
-        # 同步 handler 或线程池仍有活动任务时，心跳必须持续到 drain 完成。
-        with self._active_claims_lock:
-            self._draining = self.executor is not None or bool(self._active_claims)
-        self.running = False
-        self._shutdown_event.set()
+        if was_running:
+            logger.info(f"Worker 正在停止: {self.worker_id} reason={reason}")
         self._maintenance_wakeup.set()
         self._heartbeat_wakeup.set()

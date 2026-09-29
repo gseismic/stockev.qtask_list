@@ -132,7 +132,7 @@ worker.run()  # 阻塞运行，自动 crash recovery + 注册 SIGINT/SIGTERM
 **关键设计**：
 - `Semaphore(max_workers * 2)` 限制线程池排队深度
 - `run()` 启动时自动 recover 失联 Worker 的 processing 任务
-- 优雅停止：信号触发 → `stop()`，drain 期间刷新 heartbeat
+- 优雅停止：信号触发 → `stop()`；已准入 handler 的任务在 drain 期间刷新 heartbeat，尚未准入的已领取任务退回 ready 且不消耗 attempt
 
 ### QueueAdmin（管理接口）
 
@@ -154,6 +154,11 @@ admin.list_tasks("stockev:fetch", state=QueueState.completed, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.failed, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.expired, limit=50)
 admin.list_tasks("stockev:fetch", state=QueueState.all, search="AAPL")
+page = admin.search_tasks_page(None, search="AAPL", limit=50)  # 固定本次全部队列快照
+if page["next_cursor"]:
+    next_page = admin.search_tasks_page(
+        None, search="AAPL", limit=50, cursor=page["next_cursor"]
+    )
 admin.list_tasks(
     "stockev:fetch",
     state=QueueState.completed,
@@ -193,6 +198,8 @@ admin.clean_history(ttl_days=15)  # 全部队列
 **QueueState 枚举**：`ready`, `processing`, `retry`, `retry_wait`, `dlq`, `delay`, `history`, `completed`, `failed`, `skipped`, `cancelled`, `deadline_missed`, `expired`, `all`
 
 `expired` 是 `deadline_missed` 的兼容别名：`TaskSpec.start_deadline_at`（兼容 `expire_seconds`）控制最晚开始时间；`clean-history` / `clean_expired()` 只负责历史记录清理，二者不是同一件事。DLQ replay 创建新 task_id，原终态不会被重新打开。
+
+`search_tasks_page()` 默认每页最多扫描 5000 条，并通过 `next_cursor` 继续；`list_tasks()` 的筛选扫描达到 5000 条时会提示改用分页接口。Dashboard 固定采用默认扫描预算。
 
 ### TaskHistory（Redis 任务历史）
 

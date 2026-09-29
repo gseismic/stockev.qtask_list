@@ -718,6 +718,42 @@ return 1
 """
 
 
+RETURN_UNSTARTED_CLAIM_LUA = r"""
+local raw_message = ARGV[1]
+local task_id = ARGV[2]
+local expected_attempt = tonumber(ARGV[3])
+local lease_token = ARGV[4]
+if redis.call('HGET', KEYS[3], 'task_id') ~= task_id then return {'missing_task'} end
+local outcome = redis.call('HGET', KEYS[3], 'outcome') or ''
+if outcome ~= '' and outcome ~= 'none' then return {'terminal', outcome} end
+if tonumber(redis.call('HGET', KEYS[3], 'attempt') or '-1') ~= expected_attempt then
+    return {'attempt_changed'}
+end
+if redis.call('HGET', KEYS[3], 'location') ~= 'processing' then
+    return {'location_changed'}
+end
+if redis.call('LREM', KEYS[1], 1, raw_message) == 0 then return {'not_found'} end
+local value = redis.call('TIME')
+local now = tonumber(value[1]) + tonumber(value[2]) / 1000000
+redis.call('RPUSH', KEYS[2], raw_message)
+redis.call(
+    'HSET', KEYS[3],
+    'attempt', tostring(expected_attempt - 1),
+    'location', 'ready',
+    'available_at', tostring(now),
+    'updated_at', tostring(now),
+    'delay_reason', ''
+)
+local deadline = tonumber(redis.call('HGET', KEYS[3], 'start_deadline_at') or '')
+if deadline then redis.call('ZADD', KEYS[4], deadline, task_id) end
+if lease_token ~= '' and redis.call('GET', KEYS[5]) == lease_token then
+    redis.call('DEL', KEYS[5])
+end
+redis.call('HINCRBY', KEYS[6], 'attempt.aborted_before_handler', 1)
+return {'returned', tostring(now)}
+"""
+
+
 RELEASE_LEASE_LUA = r"""
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
@@ -275,7 +276,7 @@ class QueueAdmin:
 
     def search_tasks_page(
         self,
-        queues: Sequence[str],
+        queues: Sequence[str] | None,
         *,
         state: QueueState | str = QueueState.all,
         action: Optional[str] = None,
@@ -288,21 +289,44 @@ class QueueAdmin:
         cursor: Optional[str] = None,
         scan_limit: int = 5000,
     ) -> Dict[str, Any]:
-        """按历史创建时间跨队列游标扫描；先筛选再限制结果数。"""
+        """按历史创建时间游标扫描；queues=None 固定查询开始时的全部队列。"""
         if limit < 1 or limit > 500 or scan_limit < limit:
             raise ValueError("invalid search limits")
         selected = QueueState(state)
-        names = sorted(set(queues))
-        fingerprint = hashlib.sha256(json.dumps(
-            [names, selected.value, action, search, created_after, created_before,
-             completed_after, completed_before], ensure_ascii=False
-        ).encode()).hexdigest()
+        mode = "all" if queues is None else "explicit"
         if cursor:
             try:
-                if len(cursor) > 8192:
+                if len(cursor) > 32768:
                     raise ValueError("cursor is too long")
-                decoded = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+                encoded = cursor[2:] if cursor.startswith("z.") else cursor
+                decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                if cursor.startswith("z."):
+                    decompressor = zlib.decompressobj()
+                    decoded = decompressor.decompress(decoded, 65537)
+                    if len(decoded) > 65536 or not decompressor.eof or decompressor.unused_data:
+                        raise ValueError("invalid compressed cursor")
                 marker = json.loads(decoded)
+                if not isinstance(marker, dict):
+                    raise ValueError("invalid cursor structure")
+                snapshot = marker.get("names")
+                if snapshot is None:
+                    # PLAN-020 游标仍可在原队列集合不变时继续使用。
+                    names = sorted(set(self.queue_names() if queues is None else queues))
+                else:
+                    if (
+                        not isinstance(snapshot, list)
+                        or any(not isinstance(name, str) or not name for name in snapshot)
+                        or snapshot != sorted(set(snapshot))
+                        or marker.get("mode") != mode
+                    ):
+                        raise ValueError("invalid cursor queues")
+                    names = snapshot
+                    if queues is not None and names != sorted(set(queues)):
+                        raise ValueError("cursor queues changed")
+                fingerprint = hashlib.sha256(json.dumps(
+                    [names, selected.value, action, search, created_after, created_before,
+                     completed_after, completed_before], ensure_ascii=False
+                ).encode()).hexdigest()
                 if marker["fingerprint"] != fingerprint:
                     raise ValueError("cursor filters changed")
                 offsets = [int(value) for value in marker["offsets"]]
@@ -313,9 +337,14 @@ class QueueAdmin:
                 cutoff = float(marker["cutoff"])
                 if not math.isfinite(cutoff) or cutoff <= 0:
                     raise ValueError("invalid cursor timestamp")
-            except (KeyError, TypeError, ValueError, OverflowError, binascii.Error) as exc:
+            except (KeyError, TypeError, ValueError, OverflowError, binascii.Error, zlib.error) as exc:
                 raise ValueError("invalid search cursor") from exc
         else:
+            names = sorted(set(self.queue_names() if queues is None else queues))
+            fingerprint = hashlib.sha256(json.dumps(
+                [names, selected.value, action, search, created_after, created_before,
+                 completed_after, completed_before], ensure_ascii=False
+            ).encode()).hexdigest()
             offsets = [0] * len(names)
             cutoff = self.clock.now()
 
@@ -394,9 +423,12 @@ class QueueAdmin:
         has_more = any(positions[index] < len(buffers[index]) or not exhausted[index] for index in range(len(names)))
         next_cursor = None
         if has_more:
-            payload = {"fingerprint": fingerprint, "offsets": offsets, "cutoff": cutoff}
-            next_cursor = base64.urlsafe_b64encode(
-                json.dumps(payload, separators=(",", ":")).encode()
+            payload = {
+                "fingerprint": fingerprint, "names": names, "mode": mode,
+                "offsets": offsets, "cutoff": cutoff,
+            }
+            next_cursor = "z." + base64.urlsafe_b64encode(
+                zlib.compress(json.dumps(payload, separators=(",", ":")).encode())
             ).decode().rstrip("=")
         return {
             "tasks": rows,
@@ -432,17 +464,26 @@ class QueueAdmin:
         if selected_state in indexed_states or search or has_time_filter:
             rows: List[Dict[str, Any]] = []
             cursor: Optional[str] = None
+            scanned = 0
+            scan_budget = 5000
             while len(rows) < limit:
+                remaining = scan_budget - scanned
+                if remaining <= 0:
+                    raise ValueError("list_tasks 扫描已达 5000 条；请使用 search_tasks_page 继续翻页")
                 page = self.search_tasks_page(
                     [queue_name], state=selected_state, search=search,
                     created_after=created_after, created_before=created_before,
                     completed_after=completed_after, completed_before=completed_before,
-                    limit=min(limit - len(rows), 500), cursor=cursor,
+                    limit=min(limit - len(rows), 500, remaining), cursor=cursor,
+                    scan_limit=remaining,
                 )
                 rows.extend(page["tasks"])
+                scanned += page["scanned"]
                 cursor = page["next_cursor"]
                 if not cursor:
                     break
+                if scanned >= scan_budget or page["scanned"] == 0:
+                    raise ValueError("list_tasks 扫描已达 5000 条；请使用 search_tasks_page 继续翻页")
             return rows
         rows = self._read_state(queue_name, selected_state, limit)
 
@@ -1125,6 +1166,11 @@ class QueueAdmin:
             deleted_keys += int(self.r.delete(hist_key) or 0)
 
         self.r.zrem("qtask:queues", queue_name)
+        # 删除后不能继续从每小时旧队列发现缓存中返回已不存在的队列。
+        self._legacy_queue_cache.discard(queue_name)
+        self._legacy_worker_cache = {
+            item for item in self._legacy_worker_cache if item[0] != queue_name
+        }
 
         return {"deleted_keys": deleted_keys, "history_records": history_records}
 
